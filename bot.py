@@ -1,9 +1,10 @@
 import logging
 import os
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -73,7 +74,40 @@ def is_authorized(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
-    await update.message.reply_text(build_help_message())
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📦 Track Product", callback_data="track"),
+            InlineKeyboardButton("🧾 Show List", callback_data="list"),
+        ],
+        [
+            InlineKeyboardButton("🔎 Check Price", callback_data="check"),
+            InlineKeyboardButton("❓ Help", callback_data="help"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(build_help_message(), reply_markup=reply_markup)
+
+
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    if action == "track":
+        await query.edit_message_text("Send me the Amazon product URL with /track <url>")
+    elif action == "list":
+        await list_products(update, context)
+    elif action == "check":
+        await check_now(update, context)
+    elif action == "help":
+        await query.edit_message_text(build_help_message())
+    else:
+        await query.edit_message_text("Unknown action")
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,6 +204,7 @@ def main():
     app.add_handler(CommandHandler("list", list_products))
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("check", check_now))
+    app.add_handler(CallbackQueryHandler(handle_menu_button))
 
     logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
