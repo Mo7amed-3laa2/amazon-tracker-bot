@@ -17,6 +17,19 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
 
+
+def validate_config() -> None:
+    missing = []
+    if not TOKEN:
+        missing.append("TELEGRAM_TOKEN")
+    if not CHAT_ID:
+        missing.append("CHAT_ID")
+
+    if missing:
+        raise RuntimeError(
+            "Missing required environment variable(s): " + ", ".join(missing)
+        )
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -128,6 +141,7 @@ async def post_init(application):
 
 
 def main():
+    validate_config()
     init_db()
 
     app = (
