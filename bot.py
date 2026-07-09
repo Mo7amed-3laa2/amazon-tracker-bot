@@ -37,6 +37,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def build_help_message() -> str:
+    return (
+        "🤖 Amazon Egypt Price Tracker Bot\n\n"
+        "Here’s what I can do:\n"
+        "• /track <url> — Track a product\n"
+        "• /list — Show all tracked products\n"
+        "• /untrack <id> — Stop tracking a product\n"
+        "• /check — Run a price check now"
+    )
+
+
+def build_tracking_success_message(product_name: str, price: float) -> str:
+    return (
+        f"✅ Tracking started!\n\n"
+        f"*{product_name}*\n"
+        f"Current price: `EGP {price:,.2f}`\n\n"
+        f"You can see it anytime with /list"
+    )
+
+
+def build_products_list_message(products) -> str:
+    lines = ["📦 *Tracked Products:*\n"]
+    for pid, url, name, price in products:
+        price_str = f"EGP {price:,.2f}" if price is not None else "N/A"
+        lines.append(f"*{pid}.* {name}\nPrice: `{price_str}`\n[Link]({url})\n")
+    return "\n".join(lines)
+
+
 def is_authorized(update: Update) -> bool:
     """Only allow messages from the configured chat ID."""
     return str(update.effective_chat.id) == str(CHAT_ID)
@@ -45,14 +73,7 @@ def is_authorized(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
-    await update.message.reply_text(
-        "Amazon Egypt Price Tracker Bot\n\n"
-        "Commands:\n"
-        "/track <url> — Track a product\n"
-        "/list — Show all tracked products\n"
-        "/untrack <id> — Stop tracking a product\n"
-        "/check — Run a price check now"
-    )
+    await update.message.reply_text(build_help_message())
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -69,7 +90,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please provide a valid Amazon product URL.")
         return
 
-    await update.message.reply_text("Fetching product info, please wait...")
+    await update.message.reply_text("🔎 Fetching product info, please wait...")
 
     result = fetch_product(url)
     if result is None:
@@ -81,9 +102,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_product(url, result["name"], result["price"])
     await update.message.reply_text(
-        f"Tracking started!\n\n"
-        f"*{result['name']}*\n"
-        f"Current price: `EGP {result['price']:,.2f}`",
+        build_tracking_success_message(result["name"], result["price"]),
         parse_mode="Markdown",
     )
 
@@ -97,13 +116,8 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No products tracked yet. Use /track <url> to add one.")
         return
 
-    lines = ["*Tracked Products:*\n"]
-    for pid, url, name, price in products:
-        price_str = f"EGP {price:,.2f}" if price is not None else "N/A"
-        lines.append(f"*{pid}.* {name}\nPrice: `{price_str}`\n[Link]({url})\n")
-
     await update.message.reply_text(
-        "\n".join(lines),
+        build_products_list_message(products),
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -124,7 +138,7 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     remove_product(product_id)
-    await update.message.reply_text(f"Stopped tracking: *{product[2]}*", parse_mode="Markdown")
+    await update.message.reply_text(f"🗑️ Stopped tracking: *{product[2]}*", parse_mode="Markdown")
 
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
