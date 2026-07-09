@@ -7,6 +7,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 from database import init_db, add_product, get_all_products, remove_product, get_product_by_id
 from scraper import fetch_product
@@ -41,12 +43,26 @@ logger = logging.getLogger(__name__)
 def build_help_message() -> str:
     return (
         "🤖 Amazon Egypt Price Tracker Bot\n\n"
-        "Here’s what I can do:\n"
-        "• /track <url> — Track a product\n"
-        "• /list — Show all tracked products\n"
-        "• /untrack <id> — Stop tracking a product\n"
-        "• /check — Run a price check now"
+        "Use the buttons below to manage your tracker.\n"
+        "You can still use commands, but the menu is the main experience."
     )
+
+
+def build_menu_markup() -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("📦 Track Product", callback_data="track"),
+            InlineKeyboardButton("🧾 Show List", callback_data="list"),
+        ],
+        [
+            InlineKeyboardButton("🔎 Check Price", callback_data="check"),
+            InlineKeyboardButton("🗑 Untrack", callback_data="untrack"),
+        ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="help"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 
 def build_tracking_success_message(product_name: str, price: float) -> str:
@@ -75,19 +91,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("📦 Track Product", callback_data="track"),
-            InlineKeyboardButton("🧾 Show List", callback_data="list"),
-        ],
-        [
-            InlineKeyboardButton("🔎 Check Price", callback_data="check"),
-            InlineKeyboardButton("❓ Help", callback_data="help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(build_help_message(), reply_markup=reply_markup)
+    context.user_data["awaiting_track_url"] = False
+    context.user_data["awaiting_untrack_id"] = False
+    await update.message.reply_text(build_help_message(), reply_markup=build_menu_markup())
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,45 +105,61 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     action = query.data
     if action == "track":
-        await query.edit_message_text("Send me the Amazon product URL with /track <url>")
+        context.user_data["awaiting_track_url"] = True
+        context.user_data["awaiting_untrack_id"] = False
+        await query.edit_message_text(
+            "Send me the Amazon product URL to track it.\nExample: https://www.amazon.com.eg/...",
+            reply_markup=build_menu_markup(),
+        )
     elif action == "list":
         products = get_all_products()
         if not products:
-            await query.edit_message_text("No products tracked yet. Use /track <url> to add one.")
+            await query.edit_message_text(
+                "No products tracked yet. Use the menu to add one by sending a product URL.",
+                reply_markup=build_menu_markup(),
+            )
             return
-        await query.edit_message_text(build_products_list_message(products), parse_mode="Markdown", disable_web_page_preview=True)
+        await query.edit_message_text(
+            build_products_list_message(products),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=build_menu_markup(),
+        )
     elif action == "check":
-        await query.edit_message_text("Running price check now...")
+        await query.edit_message_text("Running price check now...", reply_markup=build_menu_markup())
         from scheduler import check_prices
         await check_prices(context.bot, CHAT_ID)
-        await query.edit_message_text("Price check complete.")
+        await query.edit_message_text("Price check complete.", reply_markup=build_menu_markup())
+    elif action == "untrack":
+        context.user_data["awaiting_untrack_id"] = True
+        context.user_data["awaiting_track_url"] = False
+        await query.edit_message_text(
+            "Send me the product ID to remove from tracking.\nUse the list view to see the IDs.",
+            reply_markup=build_menu_markup(),
+        )
     elif action == "help":
-        await query.edit_message_text(build_help_message())
+        await query.edit_message_text(build_help_message(), reply_markup=build_menu_markup())
     else:
-        await query.edit_message_text("Unknown action")
+        await query.edit_message_text("Unknown action", reply_markup=build_menu_markup())
 
 
-async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    if not url:
+        await update.message.reply_text("Please provide a valid Amazon product URL.", reply_markup=build_menu_markup())
         return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /track <amazon product url>")
-        return
-
-    url = context.args[0].strip()
 
     if "amazon.com.eg" not in url and "amazon." not in url:
-        await update.message.reply_text("Please provide a valid Amazon product URL.")
+        await update.message.reply_text("Please provide a valid Amazon product URL.", reply_markup=build_menu_markup())
         return
 
-    await update.message.reply_text("🔎 Fetching product info, please wait...")
+    await update.message.reply_text("🔎 Fetching product info, please wait...", reply_markup=build_menu_markup())
 
     result = fetch_product(url)
     if result is None:
         await update.message.reply_text(
             "Could not fetch the product. Please check the URL or try again later.\n"
-            "Amazon may be blocking the request temporarily."
+            "Amazon may be blocking the request temporarily.",
+            reply_markup=build_menu_markup(),
         )
         return
 
@@ -145,7 +167,44 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"]),
         parse_mode="Markdown",
+        reply_markup=build_menu_markup(),
     )
+
+
+async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id_text: str):
+    if not product_id_text.isdigit():
+        await update.message.reply_text(
+            "Please send a valid product ID.",
+            reply_markup=build_menu_markup(),
+        )
+        return
+
+    product_id = int(product_id_text)
+    product = get_product_by_id(product_id)
+    if product is None:
+        await update.message.reply_text(f"No product found with ID {product_id}.", reply_markup=build_menu_markup())
+        return
+
+    remove_product(product_id)
+    await update.message.reply_text(
+        f"🗑️ Stopped tracking: *{product[2]}*",
+        parse_mode="Markdown",
+        reply_markup=build_menu_markup(),
+    )
+
+
+async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /track <amazon product url>",
+            reply_markup=build_menu_markup(),
+        )
+        return
+
+    await process_track_url(update, context, context.args[0].strip())
 
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,6 +220,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         build_products_list_message(products),
         parse_mode="Markdown",
         disable_web_page_preview=True,
+        reply_markup=build_menu_markup(),
     )
 
 
@@ -168,27 +228,44 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /untrack <product id>\nUse /list to see product IDs.")
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /untrack <product id>\nUse /list to see product IDs.",
+            reply_markup=build_menu_markup(),
+        )
         return
 
-    product_id = int(context.args[0])
-    product = get_product_by_id(product_id)
-    if product is None:
-        await update.message.reply_text(f"No product found with ID {product_id}.")
+    await process_untrack_id(update, context, context.args[0].strip())
+
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
         return
 
-    remove_product(product_id)
-    await update.message.reply_text(f"🗑️ Stopped tracking: *{product[2]}*", parse_mode="Markdown")
+    if context.user_data.get("awaiting_track_url"):
+        context.user_data["awaiting_track_url"] = False
+        await process_track_url(update, context, update.message.text.strip())
+        return
+
+    if context.user_data.get("awaiting_untrack_id"):
+        context.user_data["awaiting_untrack_id"] = False
+        await process_untrack_id(update, context, update.message.text.strip())
+        return
+
+    if update.message.text and update.message.text.lower() in {"menu", "main menu", "show menu"}:
+        await update.message.reply_text(build_help_message(), reply_markup=build_menu_markup())
+        return
+
+    await update.message.reply_text(build_help_message(), reply_markup=build_menu_markup())
 
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
-    await update.message.reply_text("Running price check now...")
+    await update.message.reply_text("Running price check now...", reply_markup=build_menu_markup())
     from scheduler import check_prices
     await check_prices(context.bot, CHAT_ID)
-    await update.message.reply_text("Price check complete.")
+    await update.message.reply_text("Price check complete.", reply_markup=build_menu_markup())
 
 
 async def post_init(application):
@@ -212,6 +289,7 @@ def main():
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("check", check_now))
     app.add_handler(CallbackQueryHandler(handle_menu_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
