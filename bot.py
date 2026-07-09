@@ -101,9 +101,16 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if action == "track":
         await query.edit_message_text("Send me the Amazon product URL with /track <url>")
     elif action == "list":
-        await list_products(update, context)
+        products = get_all_products()
+        if not products:
+            await query.edit_message_text("No products tracked yet. Use /track <url> to add one.")
+            return
+        await query.edit_message_text(build_products_list_message(products), parse_mode="Markdown", disable_web_page_preview=True)
     elif action == "check":
-        await check_now(update, context)
+        await query.edit_message_text("Running price check now...")
+        from scheduler import check_prices
+        await check_prices(context.bot, CHAT_ID)
+        await query.edit_message_text("Price check complete.")
     elif action == "help":
         await query.edit_message_text(build_help_message())
     else:
