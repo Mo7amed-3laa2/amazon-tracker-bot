@@ -82,6 +82,29 @@ def build_products_list_message(products) -> str:
     return "\n".join(lines)
 
 
+def is_valid_amazon_url(url: str) -> bool:
+    """Check if URL is a valid Amazon link in any supported format."""
+    amazon_domains = [
+        "amazon.com",
+        "amazon.co",
+        "amazon.de",
+        "amazon.fr",
+        "amazon.it",
+        "amazon.es",
+        "amazon.nl",
+        "amazon.ca",
+        "amazon.com.au",
+        "amazon.com.br",
+        "amazon.in",
+        "amazon.jp",
+        "amazon.sg",
+        "amazon.ae",
+        "amazon.sa",
+        "amzn.",
+    ]
+    return any(domain in url for domain in amazon_domains)
+
+
 def is_authorized(update: Update) -> bool:
     """Only allow messages from the configured chat ID."""
     return str(update.effective_chat.id) == str(CHAT_ID)
@@ -108,7 +131,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["awaiting_track_url"] = True
         context.user_data["awaiting_untrack_id"] = False
         await query.edit_message_text(
-            "Send me the Amazon product URL to track it.\nExample: https://www.amazon.com.eg/...",
+            "Send me the Amazon product URL to track it.\nExamples:\n• https://www.amazon.com.eg/...\n• https://amzn.eu/d/00rKyOJw",
             reply_markup=build_menu_markup(),
         )
     elif action == "list":
@@ -148,7 +171,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text("Please provide a valid Amazon product URL.", reply_markup=build_menu_markup())
         return
 
-    if "amazon.com.eg" not in url and "amazon." not in url:
+    if not is_valid_amazon_url(url):
         await update.message.reply_text("Please provide a valid Amazon product URL.", reply_markup=build_menu_markup())
         return
 
