@@ -83,21 +83,44 @@ def build_tracking_success_message(product_name: str, price: float) -> str:
     )
 
 
-def build_products_list_message(products) -> str:
+def build_products_list_markup(products) -> tuple[str, InlineKeyboardMarkup]:
+    """Build products list message and keyboard."""
     if not products:
-        return "📦 *Tracked Products:*\n\nNo products tracked yet."
+        return "📦 *Tracked Products:*\n\nNo products tracked yet.", build_menu_markup()
 
-    lines = [f"📦 *Tracked Products* ({len(products)})\n"]
-    for pid, url, name, price, added_at in products:
-        price_str = f"EGP {price:,.2f}" if price is not None else "N/A"
-        added_date = datetime.fromisoformat(added_at).strftime("%b %d") if added_at else "N/A"
-        lines.append(
-            f"*{pid}.* {name}\n"
-            f"💰 Price: `{price_str}`\n"
-            f"📅 Added: {added_date}\n"
-            f"🔗 [View on Amazon]({url})\n"
-        )
-    return "\n".join(lines)
+    message = f"📦 *Tracked Products* ({len(products)})\n\n_Tap a product to view details:_\n"
+    keyboard = []
+
+    for pid, _url, name, _price, _image_url, _added_at in products:
+        message += f"#{pid} • {name}\n"
+        keyboard.append([InlineKeyboardButton(f"#{pid} • {name}", callback_data=f"product_{pid}")])
+
+    keyboard.append([InlineKeyboardButton("◀ Back to Menu", callback_data="back_to_menu")])
+    return message, InlineKeyboardMarkup(keyboard)
+
+
+def build_product_detail_message(product: tuple) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Build detailed product view message and keyboard."""
+    pid, url, name, price, _image_url, added_at = product
+    price_str = f"EGP {price:,.2f}" if price is not None else "N/A"
+    added_date = datetime.fromisoformat(added_at).strftime("%b %d, %Y") if added_at else "N/A"
+
+    message = (
+        f"📦 *Product Details*\n\n"
+        f"*{name}*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Current Price: `{price_str}`\n"
+        f"📅 Added: {added_date}\n"
+        f"🔗 Link: [Amazon]({url})\n"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🛒 Buy on Amazon", url=url)],
+        [InlineKeyboardButton("🗑 Remove", callback_data=f"remove_{pid}")],
+        [InlineKeyboardButton("◀ Back to List", callback_data="list")],
+    ]
+
+    return message, InlineKeyboardMarkup(keyboard)
 
 
 def is_valid_amazon_url(url: str) -> bool:
@@ -145,6 +168,29 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     action = query.data
+
+    if action.startswith("product_"):
+        product_id = int(action.split("_")[1])
+        product = get_product_by_id(product_id)
+        if product:
+            message, markup = build_product_detail_message(product)
+            await query.edit_message_text(message, parse_mode="Markdown", reply_markup=markup)
+        return
+
+    if action.startswith("remove_"):
+        product_id = int(action.split("_")[1])
+        product = get_product_by_id(product_id)
+        if product:
+            product_name = product[2]
+            remove_product(product_id)
+            await query.edit_message_text(
+                f"✅ *Removed from tracking*\n\n"
+                f"_No longer monitoring:_\n"
+                f"📦 {product_name}",
+                parse_mode="Markdown",
+                reply_markup=build_menu_markup(),
+            )
+        return
     if action == "track":
         context.user_data["awaiting_track_url"] = True
         context.user_data["awaiting_untrack_id"] = False
@@ -167,22 +213,27 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 reply_markup=build_menu_markup(),
             )
             return
+        message, markup = build_products_list_markup(products)
         await query.edit_message_text(
-            build_products_list_message(products),
+            message,
             parse_mode="Markdown",
             disable_web_page_preview=True,
-            reply_markup=build_menu_markup(),
+            reply_markup=markup,
         )
+    elif action == "back_to_menu":
+        await query.edit_message_text(build_help_message(), parse_mode="Markdown", reply_markup=build_menu_markup())
     elif action == "check":
         await query.edit_message_text(
-            "🔍 *Checking all prices...*\n_Updating latest prices from Amazon._",
+            "🔍 *Checking prices...*\n_Scanning all products for updates._",
             parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
         from scheduler import check_prices
         await check_prices(context.bot, CHAT_ID)
         await query.edit_message_text(
-            "✅ *All prices updated!*\n\n_View your list to see the latest prices._",
+            "✅ *Price check done!*\n\n"
+            "_Check above for any price change notifications._\n"
+            "_View your list for the latest prices._",
             parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
@@ -241,7 +292,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         return
 
-    add_product(url, result["name"], result["price"])
+    add_product(url, result["name"], result["price"], result.get("image"))
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"]),
         parse_mode="Markdown",
@@ -311,11 +362,12 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    message, markup = build_products_list_markup(products)
     await update.message.reply_text(
-        build_products_list_message(products),
+        message,
         parse_mode="Markdown",
         disable_web_page_preview=True,
-        reply_markup=build_menu_markup(),
+        reply_markup=markup,
     )
 
 
@@ -366,15 +418,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
-    await update.message.reply_text(
-        "🔍 *Checking prices...*\n_Please wait while I update all prices._",
+    status_msg = await update.message.reply_text(
+        "🔍 *Checking prices...*\n_Scanning all your products for price changes._",
         parse_mode="Markdown",
         reply_markup=build_menu_markup(),
     )
     from scheduler import check_prices
     await check_prices(context.bot, CHAT_ID)
-    await update.message.reply_text(
-        "✅ *Price check complete!*\n\n_Check the list to see the latest prices._",
+    await status_msg.edit_text(
+        "✅ *Price check complete!*\n\n"
+        "_All products have been updated._\n"
+        "_Check notifications above for any price changes!_",
         parse_mode="Markdown",
         reply_markup=build_menu_markup(),
     )

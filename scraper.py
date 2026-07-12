@@ -18,7 +18,7 @@ scraper = cloudscraper.create_scraper()
 
 def fetch_product(url: str) -> dict | None:
     """
-    Scrape an Amazon.com.eg product page and return name and price.
+    Scrape an Amazon product page and return name, price, and image.
     Returns None if the page could not be parsed.
     """
     try:
@@ -30,18 +30,39 @@ def fetch_product(url: str) -> dict | None:
 
     soup = BeautifulSoup(response.text, "lxml")
 
-    # --- Product name ---
-    name_tag = soup.find(id="productTitle")
-    name = name_tag.get_text(strip=True) if name_tag else "Unknown Product"
-
-    # --- Price: try multiple selectors Amazon uses ---
+    name = _extract_name(soup)
     price = _extract_price(soup)
+    image_url = _extract_image(soup)
 
     if price is None:
         print(f"[scraper] Could not find price for: {url}")
         return None
 
-    return {"name": name, "price": price}
+    return {
+        "name": name,
+        "price": price,
+        "image": image_url,
+        "url": url,
+    }
+
+
+def _extract_name(soup: BeautifulSoup) -> str:
+    """Extract product name from the page."""
+    name_tag = soup.find(id="productTitle")
+    return name_tag.get_text(strip=True) if name_tag else "Unknown Product"
+
+
+def _extract_image(soup: BeautifulSoup) -> str | None:
+    """Extract product image URL from the page."""
+    img_tag = soup.find("img", {"id": "landingImage"})
+    if img_tag and img_tag.get("src"):
+        return img_tag["src"]
+
+    img_tag = soup.find("img", {"class": "a-dynamic-image"})
+    if img_tag and img_tag.get("src"):
+        return img_tag["src"]
+
+    return None
 
 
 def _extract_price(soup: BeautifulSoup) -> float | None:
