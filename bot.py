@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 from database import (
-    init_db, add_product, get_all_products, remove_product, get_product_by_id,
+    init_db, add_product, get_user_products, remove_product, get_product_by_id,
     is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
     get_authorized_users, get_user_info, get_user_language, set_user_language
 )
@@ -362,7 +362,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
     elif action == "list":
-        products = get_all_products()
+        products = get_user_products(user_id)
         if not products:
             if lang == "ar":
                 msg = "📦 *منتجاتك المتتبعة*\n\n_لم تضف أي منتجات بعد._\n\nاستخدم 📦 لإضافة أول منتج!"
@@ -487,7 +487,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
         return
 
-    add_product(url, result["name"], result["price"], result.get("image"))
+    add_product(user_id, url, result["name"], result["price"], result.get("image"))
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"], lang),
         parse_mode="Markdown",
@@ -552,7 +552,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lang = context.user_data.get("language", "en")
-    products = get_all_products()
+    products = get_user_products(user_id)
     if not products:
         if lang == "ar":
             msg = ("📦 *لا توجد منتجات مراقبة حتى الآن*\n\n"

@@ -2,7 +2,7 @@ import logging
 import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
-from database import get_all_products, update_price, get_all_authorized_users_for_notification
+from database import get_all_products, update_price, get_users_tracking_url, get_product_by_url
 from scraper import fetch_product
 
 logger = logging.getLogger(__name__)
@@ -60,9 +60,9 @@ async def check_prices(bot: Bot):
     if not products:
         return
 
-    logger.info(f"[scheduler] Checking {len(products)} product(s)...")
+    logger.info(f"[scheduler] Checking {len(products)} unique product(s)...")
 
-    for product_id, url, name, last_price, prev_price, image_url, added_at in products:
+    for url, name, last_price, prev_price, image_url in products:
         result = fetch_product(url)
         if result is None:
             logger.warning(f"[scheduler] Could not fetch: {url}")
@@ -76,8 +76,8 @@ async def check_prices(bot: Bot):
             continue
 
         if new_price != last_price:
-            authorized_users = get_all_authorized_users_for_notification()
-            for user_id, language in authorized_users:
+            tracking_users = get_users_tracking_url(url)
+            for user_id, language in tracking_users:
                 message = get_localized_notification(product_name, last_price, new_price, url, language)
                 try:
                     await bot.send_message(
