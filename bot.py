@@ -162,6 +162,7 @@ def build_menu_markup(lang: str = "en", user_id: int = None) -> InlineKeyboardMa
     remove_btn = "❌ إزالة" if lang == "ar" else "❌ Remove"
     help_btn = "❓ المساعدة" if lang == "ar" else "❓ Help & Info"
     lang_btn = "🌐 اللغة" if lang == "ar" else "🌐 Language"
+    admin_btn = "👑 إدارة المستخدمين" if lang == "ar" else "👑 User Management"
 
     keyboard = [
         [
@@ -175,6 +176,9 @@ def build_menu_markup(lang: str = "en", user_id: int = None) -> InlineKeyboardMa
         keyboard.append([
             InlineKeyboardButton(check_btn, callback_data="check"),
             InlineKeyboardButton(remove_btn, callback_data="untrack"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton(admin_btn, callback_data="admin_panel"),
         ])
     else:
         keyboard.append([
@@ -441,6 +445,62 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         set_user_language(user_id, new_lang)
         update_msg = "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*"
         await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang, user_id))
+
+    elif action == "admin_panel":
+        if not is_user_admin(user_id):
+            return
+        authorized_users = get_authorized_users()
+        if not authorized_users:
+            if lang == "ar":
+                msg = "❌ لا توجد مستخدمات مصرحة حالياً"
+            else:
+                msg = "❌ No authorized users yet"
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+            return
+
+        if lang == "ar":
+            msg = "👥 *اختر مستخدماً لعرض منتجاته:*\n\n"
+            back_btn = "◀ العودة"
+        else:
+            msg = "👥 *Select a user to view their products:*\n\n"
+            back_btn = "◀ Back"
+
+        user_keyboard = []
+        for usr_id, usr_name, is_adm, auth_date in authorized_users:
+            admin_badge = "👑 " if is_adm else ""
+            usr_display = f"{admin_badge}{usr_name or 'N/A'}"
+            user_keyboard.append([InlineKeyboardButton(f"🆔 {usr_id} - {usr_display}", callback_data=f"view_user_{usr_id}")])
+
+        user_keyboard.append([InlineKeyboardButton(back_btn, callback_data="back_to_menu")])
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(user_keyboard))
+
+    elif action.startswith("view_user_"):
+        if not is_user_admin(user_id):
+            return
+        target_user_id = int(action.split("_")[2])
+        products = get_user_products(target_user_id)
+
+        user_info = get_user_info(target_user_id)
+        username = user_info[1] if user_info else "Unknown"
+
+        if not products:
+            if lang == "ar":
+                msg = f"📦 *منتجات المستخدم:* @{username}\n\n_لا توجد منتجات مراقبة._"
+            else:
+                msg = f"📦 *User's Products:* @{username}\n\n_No products tracked._"
+
+            back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+            keyboard = [[InlineKeyboardButton(back_btn, callback_data="admin_panel")]]
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        product_list_msg = build_products_list_message(products, lang)
+        header = f"📦 *منتجات المستخدم:* @{username}\n\n" if lang == "ar" else f"📦 *User's Products:* @{username}\n\n"
+        final_msg = header + product_list_msg
+
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="admin_panel")]]
+        await query.edit_message_text(final_msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "back_to_menu":
         await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
@@ -776,6 +836,63 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def viewuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: View a specific user's tracked products."""
+    user_id = update.effective_user.id
+    if not is_user_admin(user_id):
+        lang = context.user_data.get("language", "en")
+        msg = "❌ *Admin only* / ❌ *للمسؤول فقط*"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    lang = context.user_data.get("language", "en")
+
+    if not context.args or len(context.args) < 1:
+        if lang == "ar":
+            msg = "الاستخدام: `/viewuser <معرف_المستخدم>`\n\nمثال:\n`/viewuser 987654321`"
+        else:
+            msg = "Usage: `/viewuser <user_id>`\n\nExample:\n`/viewuser 987654321`"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    target_user_id_str = context.args[0]
+    if not target_user_id_str.isdigit():
+        if lang == "ar":
+            msg = "❌ معرف مستخدم غير صالح"
+        else:
+            msg = "❌ Invalid user ID"
+        await update.message.reply_text(msg)
+        return
+
+    target_user_id = int(target_user_id_str)
+    user_info = get_user_info(target_user_id)
+
+    if not user_info:
+        if lang == "ar":
+            msg = f"❌ المستخدم `{target_user_id}` غير موجود"
+        else:
+            msg = f"❌ User `{target_user_id}` not found"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    username = user_info[1] or "N/A"
+    products = get_user_products(target_user_id)
+
+    if not products:
+        if lang == "ar":
+            msg = f"📦 *منتجات المستخدم:* @{username}\n\n_لا توجد منتجات مراقبة._"
+        else:
+            msg = f"📦 *User's Products:* @{username}\n\n_No products tracked._"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    product_list_msg = build_products_list_message(products, lang)
+    header = f"📦 *منتجات المستخدم:* @{username}\n\n" if lang == "ar" else f"📦 *User's Products:* @{username}\n\n"
+    final_msg = header + product_list_msg
+
+    await update.message.reply_text(final_msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+
 async def post_init(application):
     start_scheduler(application.bot, INTERVAL)
 
@@ -805,6 +922,7 @@ def main():
     app.add_handler(CommandHandler("adduser", adduser))
     app.add_handler(CommandHandler("removeuser", removeuser))
     app.add_handler(CommandHandler("users", users))
+    app.add_handler(CommandHandler("viewuser", viewuser))
 
     # Callbacks and messages
     app.add_handler(CallbackQueryHandler(handle_menu_button))
