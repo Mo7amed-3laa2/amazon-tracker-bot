@@ -11,7 +11,11 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from database import init_db, add_product, get_all_products, remove_product, get_product_by_id
+from database import (
+    init_db, add_product, get_all_products, remove_product, get_product_by_id,
+    is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
+    get_authorized_users, get_user_info
+)
 from scraper import fetch_product
 from scheduler import start_scheduler
 
@@ -19,6 +23,7 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+ADMIN_ID = int(CHAT_ID) if CHAT_ID else None  # Primary admin
 INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
 
 TRANSLATIONS = {
@@ -256,13 +261,64 @@ def is_valid_amazon_url(url: str) -> bool:
     return any(domain in url for domain in amazon_domains)
 
 
-def is_authorized(update: Update) -> bool:
-    """Only allow messages from the configured chat ID."""
-    return str(update.effective_chat.id) == str(CHAT_ID)
+def is_user_auth(user_id: int) -> bool:
+    """Check if user is authorized (admin or in whitelist)."""
+    return user_id == ADMIN_ID or is_user_authorized(user_id)
+
+
+def is_user_admin(user_id: int) -> bool:
+    """Check if user is admin (primary admin or has admin flag)."""
+    return user_id == ADMIN_ID or is_admin(user_id)
+
+
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user's Telegram ID. Public command - no auth required."""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "No username"
+    first_name = update.effective_user.first_name or "User"
+
+    lang = context.user_data.get("language", "en")
+
+    if lang == "ar":
+        msg = (
+            f"👤 *معلومات حسابك:*\n\n"
+            f"🆔 معرف المستخدم: `{user_id}`\n"
+            f"📝 اسم المستخدم: @{username}\n"
+            f"👋 الاسم: {first_name}\n\n"
+            f"_شارك هذا المعرف مع المسؤول لتتمكن من استخدام البوت_"
+        )
+    else:
+        msg = (
+            f"👤 *Your Account Info:*\n\n"
+            f"🆔 User ID: `{user_id}`\n"
+            f"📝 Username: @{username}\n"
+            f"👋 Name: {first_name}\n\n"
+            f"_Share this ID with the admin to use the bot_"
+        )
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+
+    if not is_user_auth(user_id):
+        lang = context.user_data.get("language", "en")
+        if lang == "ar":
+            msg = (
+                f"❌ *أنت غير مصرح بالوصول*\n\n"
+                f"معرف المستخدم الخاص بك:\n`{user_id}`\n\n"
+                f"_يرجى إرسال هذا المعرف إلى المسؤول للحصول على إذن الوصول_\n\n"
+                f"استخدم `/myid` للحصول على معلومات حسابك"
+            )
+        else:
+            msg = (
+                f"❌ *You are not authorized*\n\n"
+                f"Your User ID:\n`{user_id}`\n\n"
+                f"_Please send this ID to the admin to get access_\n\n"
+                f"Use `/myid` to get your account info"
+            )
+        await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
     if "language" not in context.user_data:
@@ -278,7 +334,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
         return
 
     query = update.callback_query
@@ -378,6 +435,10 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
+        return
+
     lang = context.user_data.get("language", "en")
 
     if not url:
@@ -434,6 +495,10 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id_text: str):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
+        return
+
     lang = context.user_data.get("language", "en")
 
     if not product_id_text.isdigit():
@@ -464,7 +529,8 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
         return
 
     lang = context.user_data.get("language", "en")
@@ -480,7 +546,8 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
         return
 
     lang = context.user_data.get("language", "en")
@@ -506,7 +573,8 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
         return
 
     lang = context.user_data.get("language", "en")
@@ -528,7 +596,8 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
         return
 
     lang = context.user_data.get("language", "en")
@@ -556,7 +625,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    if not is_user_auth(user_id):
         return
 
     lang = context.user_data.get("language", "en")
@@ -571,6 +641,120 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from scheduler import check_prices
     await check_prices(context.bot, CHAT_ID)
     await update.message.reply_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+
+
+# Admin Commands
+
+async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: Add a new authorized user."""
+    user_id = update.effective_user.id
+    if not is_user_admin(user_id):
+        lang = context.user_data.get("language", "en")
+        msg = "❌ *Admin only* / ❌ *للمسؤول فقط*"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    lang = context.user_data.get("language", "en")
+
+    if not context.args or len(context.args) < 1:
+        if lang == "ar":
+            msg = "الاستخدام: `/adduser <معرف_المستخدم> [اسم_المستخدم]`\n\nمثال:\n`/adduser 987654321 john`"
+        else:
+            msg = "Usage: `/adduser <user_id> [username]`\n\nExample:\n`/adduser 987654321 john`"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    new_user_id = context.args[0]
+    username = context.args[1] if len(context.args) > 1 else None
+
+    if not new_user_id.isdigit():
+        if lang == "ar":
+            msg = "❌ معرف مستخدم غير صالح"
+        else:
+            msg = "❌ Invalid user ID"
+        await update.message.reply_text(msg)
+        return
+
+    add_authorized_user(int(new_user_id), username)
+
+    if lang == "ar":
+        msg = f"✅ تمت إضافة المستخدم: `{new_user_id}`"
+    else:
+        msg = f"✅ User `{new_user_id}` added successfully"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: Remove/disable a user."""
+    user_id = update.effective_user.id
+    if not is_user_admin(user_id):
+        lang = context.user_data.get("language", "en")
+        msg = "❌ *Admin only* / ❌ *للمسؤول فقط*"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    lang = context.user_data.get("language", "en")
+
+    if not context.args:
+        if lang == "ar":
+            msg = "الاستخدام: `/removeuser <معرف_المستخدم>`"
+        else:
+            msg = "Usage: `/removeuser <user_id>`"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    remove_user_id = context.args[0]
+    if not remove_user_id.isdigit():
+        if lang == "ar":
+            msg = "❌ معرف مستخدم غير صالح"
+        else:
+            msg = "❌ Invalid user ID"
+        await update.message.reply_text(msg)
+        return
+
+    remove_authorized_user(int(remove_user_id))
+
+    if lang == "ar":
+        msg = f"✅ تمت إزالة المستخدم: `{remove_user_id}`"
+    else:
+        msg = f"✅ User `{remove_user_id}` removed"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: List all authorized users."""
+    user_id = update.effective_user.id
+    if not is_user_admin(user_id):
+        lang = context.user_data.get("language", "en")
+        msg = "❌ *Admin only* / ❌ *للمسؤول فقط*"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    lang = context.user_data.get("language", "en")
+    authorized_users = get_authorized_users()
+
+    if not authorized_users:
+        if lang == "ar":
+            msg = "❌ لا توجد مستخدمات مصرحة حالياً"
+        else:
+            msg = "❌ No authorized users yet"
+        await update.message.reply_text(msg)
+        return
+
+    if lang == "ar":
+        lines = ["👥 *المستخدمون المصرحون:*\n"]
+    else:
+        lines = ["👥 *Authorized Users:*\n"]
+
+    for usr_id, usr_name, is_adm, auth_date in authorized_users:
+        admin_badge = "👑 " if is_adm else ""
+        usr_display = f"@{usr_name}" if usr_name else "N/A"
+        if lang == "ar":
+            lines.append(f"{admin_badge}🆔 {usr_id}\n📝 {usr_display}\n📅 {auth_date}\n")
+        else:
+            lines.append(f"{admin_badge}🆔 {usr_id}\n📝 {usr_display}\n📅 {auth_date}\n")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def post_init(application):
@@ -588,11 +772,22 @@ def main():
         .build()
     )
 
+    # Public commands (no auth required)
+    app.add_handler(CommandHandler("myid", myid))
+
+    # Protected commands (auth required)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("list", list_products))
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("check", check_now))
+
+    # Admin commands
+    app.add_handler(CommandHandler("adduser", adduser))
+    app.add_handler(CommandHandler("removeuser", removeuser))
+    app.add_handler(CommandHandler("users", users))
+
+    # Callbacks and messages
     app.add_handler(CallbackQueryHandler(handle_menu_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
