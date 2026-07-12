@@ -155,7 +155,7 @@ def build_help_message(lang: str = "en") -> str:
     )
 
 
-def build_menu_markup(lang: str = "en") -> InlineKeyboardMarkup:
+def build_menu_markup(lang: str = "en", user_id: int = None) -> InlineKeyboardMarkup:
     track_btn = "📦 أضف منتج" if lang == "ar" else "📦 Add Product"
     list_btn = "🧾 منتجاتي" if lang == "ar" else "🧾 My Products"
     check_btn = "🔎 افحص الآن" if lang == "ar" else "🔎 Check Now"
@@ -168,15 +168,25 @@ def build_menu_markup(lang: str = "en") -> InlineKeyboardMarkup:
             InlineKeyboardButton(track_btn, callback_data="track"),
             InlineKeyboardButton(list_btn, callback_data="list"),
         ],
-        [
+    ]
+
+    # Show check button only to admins
+    if user_id and is_user_admin(user_id):
+        keyboard.append([
             InlineKeyboardButton(check_btn, callback_data="check"),
             InlineKeyboardButton(remove_btn, callback_data="untrack"),
-        ],
+        ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton(remove_btn, callback_data="untrack"),
+        ])
+
+    keyboard.extend([
         [
             InlineKeyboardButton(help_btn, callback_data="help"),
             InlineKeyboardButton(lang_btn, callback_data="language"),
         ],
-    ]
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -329,7 +339,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         build_help_message(lang),
         parse_mode="Markdown",
-        reply_markup=build_menu_markup(lang)
+        reply_markup=build_menu_markup(lang, user_id)
     )
 
 
@@ -359,7 +369,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                    "🔗 Full: `https://www.amazon.com.eg/...`\n"
                    "⚡ Short: `https://amzn.eu/d/00rKyOJw`\n\n"
                    "_Just paste the link and I'll add it to your list!_")
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     elif action == "list":
         products = get_user_products(user_id)
@@ -368,26 +378,31 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 msg = "📦 *منتجاتك المتتبعة*\n\n_لم تضف أي منتجات بعد._\n\nاستخدم 📦 لإضافة أول منتج!"
             else:
                 msg = "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\nUse 📦 to add your first product!"
-            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
             return
         await query.edit_message_text(
             build_products_list_message(products, lang),
             parse_mode="Markdown",
             disable_web_page_preview=True,
-            reply_markup=build_menu_markup(lang),
+            reply_markup=build_menu_markup(lang, user_id),
         )
 
     elif action == "check":
+        if not is_user_admin(user_id):
+            msg = "❌ *Admin only* / ❌ *للمسؤول فقط*"
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+            return
+
         if lang == "ar":
             check_msg = "🔍 *جاري فحص الأسعار...*\n_جاري تحديث الأسعار من أمازون._"
             done_msg = "✅ *تم تحديث جميع الأسعار!*\n\n_اعرض قائمتك لرؤية أحدث الأسعار._"
         else:
             check_msg = "🔍 *Checking all prices...*\n_Updating latest prices from Amazon._"
             done_msg = "✅ *All prices updated!*\n\n_View your list to see the latest prices._"
-        await query.edit_message_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         from scheduler import check_prices
         await check_prices(context.bot)
-        await query.edit_message_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     elif action == "untrack":
         context.user_data["awaiting_untrack_id"] = True
@@ -400,10 +415,10 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg = ("❌ *Remove a product from tracking*\n\n"
                    "_Send me the product ID_ (use 🧾 to see your list first)\n"
                    "Example: `1` or `3`")
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     elif action == "help":
-        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     elif action == "language":
         back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
@@ -425,14 +440,14 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["language"] = new_lang
         set_user_language(user_id, new_lang)
         update_msg = "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*"
-        await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang))
+        await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang, user_id))
 
     elif action == "back_to_menu":
-        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     else:
         unknown_msg = "إجراء غير معروف" if lang == "ar" else "Unknown action"
-        await query.edit_message_text(unknown_msg, reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(unknown_msg, reply_markup=build_menu_markup(lang, user_id))
 
 
 async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
@@ -447,7 +462,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             msg = "❌ *رابط غير صالح*\n\nيرجى توفير رابط منتج أمازون صالح."
         else:
             msg = "❌ *Invalid URL*\n\nPlease provide a valid Amazon product link."
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     if not is_valid_amazon_url(url):
@@ -459,14 +474,14 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             msg = ("❌ *Not an Amazon link*\n\n"
                    "_This doesn't look like an Amazon URL._\n"
                    "Please make sure you're sharing a product from Amazon.")
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     if lang == "ar":
         wait_msg = "🔍 جاري جلب تفاصيل المنتج...\n_يرجى الانتظار..._"
     else:
         wait_msg = "🔍 Fetching product details...\n_Please wait..._"
-    await update.message.reply_text(wait_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+    await update.message.reply_text(wait_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     result = fetch_product(url, lang)
     if result is None:
@@ -484,14 +499,14 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                    "• Copy the link from your browser address bar\n"
                    "• Wait a moment and try again\n"
                    "• Check the product still exists")
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     add_product(user_id, url, result["name"], result["price"], result.get("image"))
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"], lang),
         parse_mode="Markdown",
-        reply_markup=build_menu_markup(lang),
+        reply_markup=build_menu_markup(lang, user_id),
     )
 
 
@@ -507,7 +522,7 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
             msg = "❌ *معرّف غير صالح*\n\n_يرجى إرسال رقم المنتج فقط (مثل `1` أو `2`)_"
         else:
             msg = "❌ *Invalid ID*\n\n_Please send just the product number (e.g., `1` or `2`)_"
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     product_id = int(product_id_text)
@@ -517,7 +532,7 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
             msg = f"❌ *المنتج غير موجود*\n\n_لا يوجد منتج برقم {product_id}._\n\nاستخدم 🧾 لفحص قائمتك."
         else:
             msg = f"❌ *Product not found*\n\n_No product with ID {product_id}._\n\nUse 🧾 to check your list."
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     remove_product(product_id)
@@ -526,7 +541,7 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
         msg = f"✅ *تمت الإزالة من المراقبة*\n\n_لم يعد قيد المراقبة:_\n📦 {product_name}"
     else:
         msg = f"✅ *Removed from tracking*\n\n_No longer monitoring:_\n📦 {product_name}"
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -540,7 +555,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "📦 *الاستخدام: /track* `<رابط-أمازون>`\n\nمثال:\n`/track https://amzn.eu/d/00rKyOJw`"
         else:
             msg = "📦 *Usage: /track* `<amazon-url>`\n\nExample:\n`/track https://amzn.eu/d/00rKyOJw`"
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     await process_track_url(update, context, context.args[0].strip())
@@ -562,14 +577,14 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = ("📦 *No products tracked yet*\n\n"
                    "_Start tracking products to see them here._\n"
                    "Use 📦 or `/track <url>` to add one!")
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     await update.message.reply_text(
         build_products_list_message(products, lang),
         parse_mode="Markdown",
         disable_web_page_preview=True,
-        reply_markup=build_menu_markup(lang),
+        reply_markup=build_menu_markup(lang, user_id),
     )
 
 
@@ -590,7 +605,7 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    "Example:\n"
                    "`/untrack 1`\n\n"
                    "_Use /list to see your product IDs_")
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     await process_untrack_id(update, context, context.args[0].strip())
@@ -615,19 +630,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text_lower = update.message.text.lower() if update.message.text else ""
     if text_lower in {"menu", "main menu", "show menu", "start"}:
-        await update.message.reply_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await update.message.reply_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     if lang == "ar":
         msg = "👋 *استخدم القائمة أدناه للبدء!*\n\n_الأوامر:_ `/track`, `/list`, `/check`, `/untrack`"
     else:
         msg = "👋 *Use the menu below to get started!*\n\n_Commands:_ `/track`, `/list`, `/check`, `/untrack`"
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_user_auth(user_id):
+    if not is_user_admin(user_id):
+        lang = context.user_data.get("language", "en")
+        msg = "❌ *Admin only* / ❌ *للمسؤول فقط*"
+        await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
     lang = context.user_data.get("language", "en")
@@ -638,10 +656,10 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         check_msg = "🔍 *Checking prices...*\n_Please wait while I update all prices._"
         done_msg = "✅ *Price check complete!*\n\n_Check the list to see the latest prices._"
 
-    await update.message.reply_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+    await update.message.reply_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
     from scheduler import check_prices
     await check_prices(context.bot, CHAT_ID)
-    await update.message.reply_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+    await update.message.reply_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
 
 # Admin Commands
