@@ -1,0 +1,4 @@
+- Price alert thresholds (notify only if drop > 5%)?
+- Price history/chart?
+- Multiple price range alerts?
+- Export price tracking data?

@@ -88,12 +88,21 @@ def build_products_list_message(products) -> str:
         return "📦 *Tracked Products:*\n\nNo products tracked yet."
 
     lines = [f"📦 *Tracked Products* ({len(products)})\n"]
-    for pid, url, name, price, added_at in products:
-        price_str = f"EGP {price:,.2f}" if price is not None else "N/A"
+    for pid, url, name, last_price, prev_price, image_url, added_at in products:
+        current_str = f"EGP {last_price:,.2f}" if last_price is not None else "N/A"
+
+        price_info = f"💰 Current: `{current_str}`"
+        if prev_price is not None and prev_price != last_price and last_price is not None:
+            prev_str = f"EGP {prev_price:,.2f}"
+            diff = last_price - prev_price
+            pct = (diff / prev_price) * 100 if prev_price > 0 else 0
+            emoji = "📉" if diff < 0 else "📈"
+            price_info += f"\n{emoji} Before: ~~`{prev_str}`~~ (±{abs(pct):.1f}%)"
+
         added_date = datetime.fromisoformat(added_at).strftime("%b %d") if added_at else "N/A"
         lines.append(
             f"*{pid}.* {name}\n"
-            f"💰 Price: `{price_str}`\n"
+            f"{price_info}\n"
             f"📅 Added: {added_date}\n"
             f"🔗 [View on Amazon]({url})\n"
         )
@@ -241,7 +250,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         return
 
-    add_product(url, result["name"], result["price"])
+    add_product(url, result["name"], result["price"], result.get("image"))
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"]),
         parse_mode="Markdown",
