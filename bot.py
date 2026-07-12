@@ -127,6 +127,7 @@ def is_valid_amazon_url(url: str) -> bool:
         "amazon.sg",
         "amazon.ae",
         "amazon.sa",
+        "amazon.eg",
         "amzn.",
     ]
     return any(domain in url for domain in amazon_domains)
