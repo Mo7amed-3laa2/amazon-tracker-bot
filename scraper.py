@@ -16,9 +16,15 @@ HEADERS = {
 scraper = cloudscraper.create_scraper()
 
 
-def fetch_product(url: str) -> dict | None:
+def fetch_product(url: str, lang: str = "en") -> dict | None:
     """
-    Scrape an Amazon product page and return name, price, and image.
+    Scrape an Amazon product page and return name, price, specs, and image.
+    Supports multiple languages by parsing the page content.
+
+    Args:
+        url: Amazon product URL
+        lang: Language code ('en' or 'ar')
+
     Returns None if the page could not be parsed.
     """
     try:
@@ -30,9 +36,11 @@ def fetch_product(url: str) -> dict | None:
 
     soup = BeautifulSoup(response.text, "lxml")
 
-    name = _extract_name(soup)
+    name = _extract_name(soup, lang)
     price = _extract_price(soup)
     image_url = _extract_image(soup)
+    description = _extract_description(soup, lang)
+    specs = _extract_specs(soup, lang)
 
     if price is None:
         print(f"[scraper] Could not find price for: {url}")
@@ -42,10 +50,13 @@ def fetch_product(url: str) -> dict | None:
         "name": name,
         "price": price,
         "image": image_url,
+        "description": description,
+        "specs": specs,
+        "language": lang,
     }
 
 
-def _extract_name(soup: BeautifulSoup) -> str:
+def _extract_name(soup: BeautifulSoup, lang: str = "en") -> str:
     """Extract product name from the page."""
     name_tag = soup.find(id="productTitle")
     return name_tag.get_text(strip=True) if name_tag else "Unknown Product"
@@ -62,6 +73,41 @@ def _extract_image(soup: BeautifulSoup) -> str | None:
         return img_tag["src"]
 
     return None
+
+
+def _extract_description(soup: BeautifulSoup, lang: str = "en") -> str | None:
+    """Extract product description from the page."""
+    desc_selectors = [
+        ("div", {"id": "feature-bullets"}),
+        ("div", {"class": "a-section a-spacing-medium a-spacing-top-medium"}),
+        ("div", {"data-feature-name": "featurebullets"}),
+    ]
+
+    for tag, attrs in desc_selectors:
+        el = soup.find(tag, attrs)
+        if el:
+            text = el.get_text(strip=True, separator="\n")
+            if text:
+                return text[:500]
+
+    return None
+
+
+def _extract_specs(soup: BeautifulSoup, lang: str = "en") -> dict | None:
+    """Extract key product specifications from the page."""
+    specs = {}
+
+    details_table = soup.find("table", {"class": "a-keyvalue"})
+    if details_table:
+        rows = details_table.find_all("tr")
+        for row in rows[:5]:
+            cells = row.find_all("td")
+            if len(cells) >= 2:
+                key = cells[0].get_text(strip=True)
+                value = cells[1].get_text(strip=True)
+                specs[key] = value
+
+    return specs if specs else None
 
 
 def _extract_price(soup: BeautifulSoup) -> float | None:

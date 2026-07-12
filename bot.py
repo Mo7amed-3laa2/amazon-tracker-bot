@@ -21,6 +21,100 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
 
+TRANSLATIONS = {
+    "en": {
+        "help_title": "🤖 *Amazon Price Tracker*",
+        "help_desc": "Track product prices and get automatic updates!",
+        "help_commands": "_Commands available:_",
+        "track_cmd": "• 📦 `/track <url>` - Add a product",
+        "list_cmd": "• 🧾 `/list` - Show tracked products",
+        "check_cmd": "• 🔎 `/check` - Check prices now",
+        "untrack_cmd": "• 🗑 `/untrack <id>` - Remove a product",
+        "help_lang": "_Supported link formats:_",
+        "lang_full": "• Full: `https://www.amazon.com.eg/...`",
+        "lang_short": "• Shortened: `https://amzn.eu/d/...`",
+        "language": "Language",
+        "english": "English",
+        "arabic": "العربية",
+        "added_success": "✅ *Successfully Added!*",
+        "current_price": "Current Price",
+        "price_updates": "You'll receive updates when the price changes.",
+        "check_list": "Check your list anytime with 🧾 or `/list`",
+        "tracked_products": "Tracked Products",
+        "no_products": "No products tracked yet.",
+        "add_first": "Use 📦 to add your first product!",
+        "send_link": "Send me the product link to track it.",
+        "full_link": "Full: `https://www.amazon.com.eg/...`",
+        "short_link": "Short: `https://amzn.eu/d/00rKyOJw`",
+        "paste_link": "Just paste the link and I'll add it to your list!",
+        "remove_product": "Remove a product from tracking",
+        "product_id": "Send me the product ID",
+        "see_list_first": "(use 🧾 to see your list first)",
+        "example": "Example",
+        "remove_from": "No longer monitoring",
+        "invalid_url": "Invalid URL",
+        "provide_link": "Please provide a valid Amazon product link.",
+        "not_amazon": "Not an Amazon link",
+        "not_amazon_desc": "This doesn't look like an Amazon URL.\nPlease make sure you're sharing a product from Amazon.",
+        "fetching": "Fetching product details...",
+        "please_wait": "Please wait...",
+        "could_not_fetch": "Could not fetch the product",
+        "link_invalid": "The link might be invalid, or Amazon is temporarily blocking requests.",
+        "try_tips": "Try:\n• Copy the link from your browser address bar\n• Wait a moment and try again\n• Check the product still exists",
+        "lang_updated": "Language Updated",
+        "select_language": "Select Language",
+        "choose_language": "Choose your preferred language for the bot:",
+    },
+    "ar": {
+        "help_title": "🤖 *تتبع أسعار أمازون*",
+        "help_desc": "تتبع أسعار المنتجات واحصل على تحديثات تلقائية!",
+        "help_commands": "_الأوامر المتاحة:_",
+        "track_cmd": "• 📦 `/track <رابط>` - إضافة منتج",
+        "list_cmd": "• 🧾 `/list` - عرض المنتجات المتتبعة",
+        "check_cmd": "• 🔎 `/check` - فحص الأسعار الآن",
+        "untrack_cmd": "• 🗑 `/untrack <رقم>` - إزالة منتج",
+        "help_lang": "_تنسيقات الروابط المدعومة:_",
+        "lang_full": "• كامل: `https://www.amazon.com.eg/...`",
+        "lang_short": "• مختصر: `https://amzn.eu/d/...`",
+        "language": "اللغة",
+        "english": "English",
+        "arabic": "العربية",
+        "added_success": "✅ *تمت الإضافة بنجاح!*",
+        "current_price": "السعر الحالي",
+        "price_updates": "ستتلقى تحديثات عند تغيير السعر.",
+        "check_list": "تحقق من قائمتك في أي وقت باستخدام 🧾 أو `/list`",
+        "tracked_products": "المنتجات المتتبعة",
+        "no_products": "لا توجد منتجات مراقبة حاليًا.",
+        "add_first": "استخدم 📦 لإضافة أول منتج!",
+        "send_link": "أرسل لي رابط المنتج لتتبعه.",
+        "full_link": "كامل: `https://www.amazon.com.eg/...`",
+        "short_link": "مختصر: `https://amzn.eu/d/00rKyOJw`",
+        "paste_link": "ما عليك سوى لصق الرابط وسأضيفه إلى قائمتك!",
+        "remove_product": "إزالة منتج من المراقبة",
+        "product_id": "أرسل لي معرّف المنتج",
+        "see_list_first": "(استخدم 🧾 لرؤية قائمتك أولاً)",
+        "example": "مثال",
+        "remove_from": "لم يعد قيد المراقبة",
+        "invalid_url": "رابط غير صالح",
+        "provide_link": "يرجى توفير رابط منتج أمازون صالح.",
+        "not_amazon": "ليس رابط أمازون",
+        "not_amazon_desc": "هذا لا يبدو أنه رابط أمازون.\nتأكد من مشاركتك منتجًا من أمازون.",
+        "fetching": "جاري جلب تفاصيل المنتج...",
+        "please_wait": "يرجى الانتظار...",
+        "could_not_fetch": "تعذر جلب المنتج",
+        "link_invalid": "قد يكون الرابط غير صالح، أو أمازون تحجب الطلب مؤقتًا.",
+        "try_tips": "جرب:\n• انسخ الرابط من شريط عنوان متصفحك\n• انتظر قليلاً ثم حاول مرة أخرى\n• تحقق من أن المنتج لا يزال موجودًا",
+        "lang_updated": "تم تحديث اللغة",
+        "select_language": "اختر اللغة",
+        "choose_language": "اختر لغتك المفضلة للروبوت:",
+    }
+}
+
+
+def get_text(lang: str, key: str) -> str:
+    """Get translated text for a key."""
+    return TRANSLATIONS.get(lang, TRANSLATIONS["en"]).get(key, "")
+
 
 def validate_config() -> None:
     missing = []
@@ -41,22 +135,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def build_help_message() -> str:
+def build_help_message(lang: str = "en") -> str:
     return (
-        "🤖 *Amazon Price Tracker*\n\n"
-        "Track product prices and get automatic updates!\n\n"
-        "_Commands available:_\n"
-        "• 📦 `/track <url>` - Add a product\n"
-        "• 🧾 `/list` - Show tracked products\n"
-        "• 🔎 `/check` - Check prices now\n"
-        "• 🗑 `/untrack <id>` - Remove a product\n\n"
-        "_Supported link formats:_\n"
-        "• Full: `https://www.amazon.com.eg/...`\n"
-        "• Shortened: `https://amzn.eu/d/...`"
+        f"{get_text(lang, 'help_title')}\n\n"
+        f"{get_text(lang, 'help_desc')}\n\n"
+        f"{get_text(lang, 'help_commands')}\n"
+        f"{get_text(lang, 'track_cmd')}\n"
+        f"{get_text(lang, 'list_cmd')}\n"
+        f"{get_text(lang, 'check_cmd')}\n"
+        f"{get_text(lang, 'untrack_cmd')}\n\n"
+        f"{get_text(lang, 'help_lang')}\n"
+        f"{get_text(lang, 'lang_full')}\n"
+        f"{get_text(lang, 'lang_short')}"
     )
 
 
-def build_menu_markup() -> InlineKeyboardMarkup:
+def build_menu_markup(lang: str = "en") -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("📦 Add Product", callback_data="track"),
@@ -68,6 +162,7 @@ def build_menu_markup() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("❓ Help & Info", callback_data="help"),
+            InlineKeyboardButton("🌐 Language", callback_data="language"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -141,9 +236,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
+    if "language" not in context.user_data:
+        context.user_data["language"] = "en"
     context.user_data["awaiting_track_url"] = False
     context.user_data["awaiting_untrack_id"] = False
-    await update.message.reply_text(build_help_message(), reply_markup=build_menu_markup())
+    await update.message.reply_text(build_help_message(context.user_data["language"]), reply_markup=build_menu_markup())
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,7 +303,32 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=build_menu_markup(),
         )
     elif action == "help":
-        await query.edit_message_text(build_help_message(), reply_markup=build_menu_markup())
+        lang = context.user_data.get("language", "en")
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+    elif action == "language":
+        lang_keyboard = [
+            [
+                InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
+                InlineKeyboardButton("🇸🇦 العربية", callback_data="lang_ar"),
+            ],
+            [InlineKeyboardButton("◀ Back", callback_data="back_to_menu")],
+        ]
+        await query.edit_message_text(
+            "🌐 *Select Language*\n\n_Choose your preferred language for the bot:_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(lang_keyboard),
+        )
+    elif action.startswith("lang_"):
+        new_lang = action.split("_")[1]
+        context.user_data["language"] = new_lang
+        await query.edit_message_text(
+            "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(new_lang),
+        )
+    elif action == "back_to_menu":
+        lang = context.user_data.get("language", "en")
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang))
     else:
         await query.edit_message_text("Unknown action", reply_markup=build_menu_markup())
 
@@ -236,7 +358,8 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         reply_markup=build_menu_markup(),
     )
 
-    result = fetch_product(url)
+    lang = context.user_data.get("language", "en")
+    result = fetch_product(url, lang)
     if result is None:
         await update.message.reply_text(
             "⚠️ *Could not fetch the product*\n\n"
@@ -246,7 +369,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             "• Wait a moment and try again\n"
             "• Check the product still exists",
             parse_mode="Markdown",
-            reply_markup=build_menu_markup(),
+            reply_markup=build_menu_markup(lang),
         )
         return
 
