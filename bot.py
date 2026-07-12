@@ -11,7 +11,11 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from database import init_db, add_product, get_all_products, remove_product, get_product_by_id
+from database import (
+    init_db, add_product, get_all_products, remove_product, get_product_by_id,
+    is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
+    get_authorized_users, get_user_language, set_user_language
+)
 from scraper import fetch_product
 from scheduler import start_scheduler
 
@@ -19,7 +23,18 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+ADMIN_ID = int(CHAT_ID) if CHAT_ID else None
 INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
+
+
+def is_user_auth(user_id: int) -> bool:
+    """Check if user is authorized."""
+    return user_id == ADMIN_ID or is_user_authorized(user_id)
+
+
+def is_user_admin(user_id: int) -> bool:
+    """Check if user is admin."""
+    return user_id == ADMIN_ID or is_admin(user_id)
 
 TRANSLATIONS = {
     "en": {
@@ -266,7 +281,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if "language" not in context.user_data:
-        context.user_data["language"] = "en"
+        context.user_data["language"] = get_user_language(user_id)
     context.user_data["awaiting_track_url"] = False
     context.user_data["awaiting_untrack_id"] = False
     lang = context.user_data["language"]
@@ -366,6 +381,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action.startswith("lang_"):
         new_lang = action.split("_")[1]
         context.user_data["language"] = new_lang
+        set_user_language(user_id, new_lang)  # Save to database
         update_msg = "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*"
         await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang))
 
