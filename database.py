@@ -28,6 +28,7 @@ def init_db():
                 user_id INTEGER UNIQUE NOT NULL,
                 username TEXT,
                 is_admin BOOLEAN DEFAULT FALSE,
+                language TEXT DEFAULT 'en',
                 authorized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status TEXT DEFAULT 'active'
             )
@@ -45,6 +46,11 @@ def init_db():
 
         try:
             conn.execute("ALTER TABLE authorized_users ADD COLUMN status TEXT DEFAULT 'active'")
+        except Exception:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE authorized_users ADD COLUMN language TEXT DEFAULT 'en'")
         except Exception:
             pass
 
@@ -151,3 +157,32 @@ def get_user_info(user_id: int):
             (user_id,)
         ).fetchone()
     return row
+
+
+def get_user_language(user_id: int) -> str:
+    """Get user's preferred language (default 'en')."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT language FROM authorized_users WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+    return row[0] if row else "en"
+
+
+def set_user_language(user_id: int, language: str):
+    """Set user's preferred language."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE authorized_users SET language = ? WHERE user_id = ?",
+            (language, user_id)
+        )
+        conn.commit()
+
+
+def get_all_authorized_users_for_notification():
+    """Get all authorized active users with their language preference."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT user_id, language FROM authorized_users WHERE status = 'active' ORDER BY authorized_at DESC"
+        ).fetchall()
+    return rows

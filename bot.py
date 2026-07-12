@@ -14,7 +14,7 @@ from telegram.ext import (
 from database import (
     init_db, add_product, get_all_products, remove_product, get_product_by_id,
     is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
-    get_authorized_users, get_user_info
+    get_authorized_users, get_user_info, get_user_language, set_user_language
 )
 from scraper import fetch_product
 from scheduler import start_scheduler
@@ -322,7 +322,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if "language" not in context.user_data:
-        context.user_data["language"] = "en"
+        context.user_data["language"] = get_user_language(user_id)
     context.user_data["awaiting_track_url"] = False
     context.user_data["awaiting_untrack_id"] = False
     lang = context.user_data["language"]
@@ -386,7 +386,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             done_msg = "✅ *All prices updated!*\n\n_View your list to see the latest prices._"
         await query.edit_message_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
         from scheduler import check_prices
-        await check_prices(context.bot, CHAT_ID)
+        await check_prices(context.bot)
         await query.edit_message_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
     elif action == "untrack":
@@ -423,6 +423,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action.startswith("lang_"):
         new_lang = action.split("_")[1]
         context.user_data["language"] = new_lang
+        set_user_language(user_id, new_lang)
         update_msg = "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*"
         await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang))
 
@@ -758,7 +759,7 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application):
-    start_scheduler(application.bot, CHAT_ID, INTERVAL)
+    start_scheduler(application.bot, INTERVAL)
 
 
 def main():
