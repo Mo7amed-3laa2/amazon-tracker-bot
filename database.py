@@ -34,7 +34,7 @@ def add_product(url: str, name: str, price: float):
 def get_all_products():
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, url, name, last_price FROM products"
+            "SELECT id, url, name, last_price, added_at FROM products ORDER BY added_at DESC"
         ).fetchall()
     return rows
 
@@ -57,7 +57,7 @@ def remove_product(product_id: int):
 def get_product_by_id(product_id: int):
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, url, name, last_price FROM products WHERE id = ?",
+            "SELECT id, url, name, last_price, added_at FROM products WHERE id = ?",
             (product_id,),
         ).fetchone()
     return row

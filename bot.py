@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -42,24 +43,31 @@ logger = logging.getLogger(__name__)
 
 def build_help_message() -> str:
     return (
-        "🤖 Amazon Egypt Price Tracker Bot\n\n"
-        "Use the buttons below to manage your tracker.\n"
-        "You can still use commands, but the menu is the main experience."
+        "🤖 *Amazon Price Tracker*\n\n"
+        "Track product prices and get automatic updates!\n\n"
+        "_Commands available:_\n"
+        "• 📦 `/track <url>` - Add a product\n"
+        "• 🧾 `/list` - Show tracked products\n"
+        "• 🔎 `/check` - Check prices now\n"
+        "• 🗑 `/untrack <id>` - Remove a product\n\n"
+        "_Supported link formats:_\n"
+        "• Full: `https://www.amazon.com.eg/...`\n"
+        "• Shortened: `https://amzn.eu/d/...`"
     )
 
 
 def build_menu_markup() -> InlineKeyboardMarkup:
     keyboard = [
         [
-            InlineKeyboardButton("📦 Track Product", callback_data="track"),
-            InlineKeyboardButton("🧾 Show List", callback_data="list"),
+            InlineKeyboardButton("📦 Add Product", callback_data="track"),
+            InlineKeyboardButton("🧾 My Products", callback_data="list"),
         ],
         [
-            InlineKeyboardButton("🔎 Check Price", callback_data="check"),
-            InlineKeyboardButton("🗑 Untrack", callback_data="untrack"),
+            InlineKeyboardButton("🔎 Check Now", callback_data="check"),
+            InlineKeyboardButton("❌ Remove", callback_data="untrack"),
         ],
         [
-            InlineKeyboardButton("❓ Help", callback_data="help"),
+            InlineKeyboardButton("❓ Help & Info", callback_data="help"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -67,18 +75,28 @@ def build_menu_markup() -> InlineKeyboardMarkup:
 
 def build_tracking_success_message(product_name: str, price: float) -> str:
     return (
-        f"✅ Tracking started!\n\n"
-        f"*{product_name}*\n"
-        f"Current price: `EGP {price:,.2f}`\n\n"
-        f"You can see it anytime with /list"
+        f"✅ *Successfully Added!*\n\n"
+        f"📦 *{product_name}*\n"
+        f"💰 Current Price: `EGP {price:,.2f}`\n\n"
+        f"_You'll receive updates when the price changes._\n"
+        f"Check your list anytime with 🧾 or `/list`"
     )
 
 
 def build_products_list_message(products) -> str:
-    lines = ["📦 *Tracked Products:*\n"]
-    for pid, url, name, price in products:
+    if not products:
+        return "📦 *Tracked Products:*\n\nNo products tracked yet."
+
+    lines = [f"📦 *Tracked Products* ({len(products)})\n"]
+    for pid, url, name, price, added_at in products:
         price_str = f"EGP {price:,.2f}" if price is not None else "N/A"
-        lines.append(f"*{pid}.* {name}\nPrice: `{price_str}`\n[Link]({url})\n")
+        added_date = datetime.fromisoformat(added_at).strftime("%b %d") if added_at else "N/A"
+        lines.append(
+            f"*{pid}.* {name}\n"
+            f"💰 Price: `{price_str}`\n"
+            f"📅 Added: {added_date}\n"
+            f"🔗 [View on Amazon]({url})\n"
+        )
     return "\n".join(lines)
 
 
@@ -131,14 +149,21 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["awaiting_track_url"] = True
         context.user_data["awaiting_untrack_id"] = False
         await query.edit_message_text(
-            "Send me the Amazon product URL to track it.\nExamples:\n• https://www.amazon.com.eg/...\n• https://amzn.eu/d/00rKyOJw",
+            "📤 *Send me the product link to track it.*\n\n"
+            "_Supported formats:_\n"
+            "🔗 Full: `https://www.amazon.com.eg/...`\n"
+            "⚡ Short: `https://amzn.eu/d/00rKyOJw`\n\n"
+            "_Just paste the link and I'll add it to your list!_",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
     elif action == "list":
         products = get_all_products()
         if not products:
             await query.edit_message_text(
-                "No products tracked yet. Use the menu to add one by sending a product URL.",
+                "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\n"
+                "Use 📦 to add your first product!",
+                parse_mode="Markdown",
                 reply_markup=build_menu_markup(),
             )
             return
@@ -149,15 +174,26 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=build_menu_markup(),
         )
     elif action == "check":
-        await query.edit_message_text("Running price check now...", reply_markup=build_menu_markup())
+        await query.edit_message_text(
+            "🔍 *Checking all prices...*\n_Updating latest prices from Amazon._",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(),
+        )
         from scheduler import check_prices
         await check_prices(context.bot, CHAT_ID)
-        await query.edit_message_text("Price check complete.", reply_markup=build_menu_markup())
+        await query.edit_message_text(
+            "✅ *All prices updated!*\n\n_View your list to see the latest prices._",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(),
+        )
     elif action == "untrack":
         context.user_data["awaiting_untrack_id"] = True
         context.user_data["awaiting_track_url"] = False
         await query.edit_message_text(
-            "Send me the product ID to remove from tracking.\nUse the list view to see the IDs.",
+            "❌ *Remove a product from tracking*\n\n"
+            "_Send me the product ID_ (use 🧾 to see your list first)\n"
+            "Example: `1` or `3`",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
     elif action == "help":
@@ -168,20 +204,39 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     if not url:
-        await update.message.reply_text("Please provide a valid Amazon product URL.", reply_markup=build_menu_markup())
+        await update.message.reply_text(
+            "❌ *Invalid URL*\n\nPlease provide a valid Amazon product link.",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(),
+        )
         return
 
     if not is_valid_amazon_url(url):
-        await update.message.reply_text("Please provide a valid Amazon product URL.", reply_markup=build_menu_markup())
+        await update.message.reply_text(
+            "❌ *Not an Amazon link*\n\n"
+            "_This doesn't look like an Amazon URL._\n"
+            "Please make sure you're sharing a product from Amazon.",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(),
+        )
         return
 
-    await update.message.reply_text("🔎 Fetching product info, please wait...", reply_markup=build_menu_markup())
+    await update.message.reply_text(
+        "🔍 Fetching product details...\n_Please wait..._",
+        parse_mode="Markdown",
+        reply_markup=build_menu_markup(),
+    )
 
     result = fetch_product(url)
     if result is None:
         await update.message.reply_text(
-            "Could not fetch the product. Please check the URL or try again later.\n"
-            "Amazon may be blocking the request temporarily.",
+            "⚠️ *Could not fetch the product*\n\n"
+            "_The link might be invalid, or Amazon is temporarily blocking requests._\n\n"
+            "💡 Try:\n"
+            "• Copy the link from your browser address bar\n"
+            "• Wait a moment and try again\n"
+            "• Check the product still exists",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
         return
@@ -197,7 +252,8 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id_text: str):
     if not product_id_text.isdigit():
         await update.message.reply_text(
-            "Please send a valid product ID.",
+            "❌ *Invalid ID*\n\n_Please send just the product number (e.g., `1` or `2`)_",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
         return
@@ -205,12 +261,19 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
     product_id = int(product_id_text)
     product = get_product_by_id(product_id)
     if product is None:
-        await update.message.reply_text(f"No product found with ID {product_id}.", reply_markup=build_menu_markup())
+        await update.message.reply_text(
+            f"❌ *Product not found*\n\n_No product with ID {product_id}._\n\nUse 🧾 to check your list.",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(),
+        )
         return
 
     remove_product(product_id)
+    product_name = product[2]
     await update.message.reply_text(
-        f"🗑️ Stopped tracking: *{product[2]}*",
+        f"✅ *Removed from tracking*\n\n"
+        f"_No longer monitoring:_\n"
+        f"📦 {product_name}",
         parse_mode="Markdown",
         reply_markup=build_menu_markup(),
     )
@@ -222,7 +285,10 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "Usage: /track <amazon product url>",
+            "📦 *Usage: /track* `<amazon-url>`\n\n"
+            "Example:\n"
+            "`/track https://amzn.eu/d/00rKyOJw`",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
         return
@@ -236,7 +302,13 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     products = get_all_products()
     if not products:
-        await update.message.reply_text("No products tracked yet. Use /track <url> to add one.")
+        await update.message.reply_text(
+            "📦 *No products tracked yet*\n\n"
+            "_Start tracking products to see them here._\n"
+            "Use 📦 or `/track <url>` to add one!",
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(),
+        )
         return
 
     await update.message.reply_text(
@@ -253,7 +325,11 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "Usage: /untrack <product id>\nUse /list to see product IDs.",
+            "🗑 *Usage: /untrack* `<product-id>`\n\n"
+            "Example:\n"
+            "`/untrack 1`\n\n"
+            "_Use /list to see your product IDs_",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(),
         )
         return
@@ -275,20 +351,33 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await process_untrack_id(update, context, update.message.text.strip())
         return
 
-    if update.message.text and update.message.text.lower() in {"menu", "main menu", "show menu"}:
-        await update.message.reply_text(build_help_message(), reply_markup=build_menu_markup())
+    text_lower = update.message.text.lower() if update.message.text else ""
+    if text_lower in {"menu", "main menu", "show menu", "start"}:
+        await update.message.reply_text(build_help_message(), parse_mode="Markdown", reply_markup=build_menu_markup())
         return
 
-    await update.message.reply_text(build_help_message(), reply_markup=build_menu_markup())
+    await update.message.reply_text(
+        "👋 *Use the menu below to get started!*\n\n_Commands:_ `/track`, `/list`, `/check`, `/untrack`",
+        parse_mode="Markdown",
+        reply_markup=build_menu_markup(),
+    )
 
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
-    await update.message.reply_text("Running price check now...", reply_markup=build_menu_markup())
+    await update.message.reply_text(
+        "🔍 *Checking prices...*\n_Please wait while I update all prices._",
+        parse_mode="Markdown",
+        reply_markup=build_menu_markup(),
+    )
     from scheduler import check_prices
     await check_prices(context.bot, CHAT_ID)
-    await update.message.reply_text("Price check complete.", reply_markup=build_menu_markup())
+    await update.message.reply_text(
+        "✅ *Price check complete!*\n\n_Check the list to see the latest prices._",
+        parse_mode="Markdown",
+        reply_markup=build_menu_markup(),
+    )
 
 
 async def post_init(application):
