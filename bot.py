@@ -440,31 +440,12 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         set_user_language(user_id, new_lang)
         logger.info(f"[bot] User {user_id} changed language to {new_lang}")
 
-        await query.answer("✅ تم تغيير اللغة" if new_lang == "ar" else "✅ Language changed")
+        msg = "✅ تم تغيير اللغة إلى العربية" if new_lang == "ar" else "✅ Language changed to English"
+        await query.answer(msg, show_alert=False)
 
-        keyboard = [
-            [
-                InlineKeyboardButton("📦 أضف منتج" if new_lang == "ar" else "📦 Add Product", callback_data="track"),
-                InlineKeyboardButton("🧾 منتجاتي" if new_lang == "ar" else "🧾 My Products", callback_data="list"),
-            ],
-            [
-                InlineKeyboardButton("🔎 افحص الآن" if new_lang == "ar" else "🔎 Check Now", callback_data="check"),
-                InlineKeyboardButton("❌ إزالة" if new_lang == "ar" else "❌ Remove", callback_data="untrack"),
-            ],
-            [
-                InlineKeyboardButton("❓ المساعدة" if new_lang == "ar" else "❓ Help & Info", callback_data="help"),
-                InlineKeyboardButton("🌐 اللغة" if new_lang == "ar" else "🌐 Language", callback_data="language"),
-            ],
-        ]
-
-        if user_id == ADMIN_ID or is_admin(user_id):
-            admin_btn = "⚙️ إدارة" if new_lang == "ar" else "⚙️ Admin"
-            keyboard.append([InlineKeyboardButton(admin_btn, callback_data="admin_menu")])
-
-        await query.edit_message_text(
-            "🌐 *اللغة*" if new_lang == "ar" else "🌐 *Language*",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        back_btn = "◀ العودة" if new_lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text("✅ Done!", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "back_to_menu":
         await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
