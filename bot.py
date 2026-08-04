@@ -158,7 +158,7 @@ def build_help_message(lang: str = "en") -> str:
     )
 
 
-def build_menu_markup(lang: str = "en") -> InlineKeyboardMarkup:
+def build_menu_markup(lang: str = "en", user_id: int | None = None) -> InlineKeyboardMarkup:
     track_btn = "📦 أضف منتج" if lang == "ar" else "📦 Add Product"
     list_btn = "🧾 منتجاتي" if lang == "ar" else "🧾 My Products"
     check_btn = "🔎 افحص الآن" if lang == "ar" else "🔎 Check Now"
@@ -180,6 +180,12 @@ def build_menu_markup(lang: str = "en") -> InlineKeyboardMarkup:
             InlineKeyboardButton(lang_btn, callback_data="language"),
         ],
     ]
+
+    is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
+    if is_admin:
+        admin_btn = "⚙️ إدارة" if lang == "ar" else "⚙️ Admin"
+        keyboard.append([InlineKeyboardButton(admin_btn, callback_data="admin_menu")])
+
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -292,7 +298,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         build_help_message(lang),
         parse_mode="Markdown",
-        reply_markup=build_menu_markup(lang)
+        reply_markup=build_menu_markup(lang, user_id)
     )
 
 
@@ -322,7 +328,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                    "🔗 Full: `https://www.amazon.com.eg/...`\n"
                    "⚡ Short: `https://amzn.eu/d/00rKyOJw`\n\n"
                    "_Just paste the link and I'll add it to your list!_")
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     elif action == "list":
         products = get_user_products(user_id)
@@ -331,13 +337,13 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 msg = "📦 *منتجاتك المتتبعة*\n\n_لم تضف أي منتجات بعد._\n\nاستخدم 📦 لإضافة أول منتج!"
             else:
                 msg = "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\nUse 📦 to add your first product!"
-            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
             return
         await query.edit_message_text(
             build_products_list_message(products, lang),
             parse_mode="Markdown",
             disable_web_page_preview=True,
-            reply_markup=build_menu_markup(lang),
+            reply_markup=build_menu_markup(lang, user_id),
         )
 
     elif action == "check":
@@ -386,16 +392,22 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action.startswith("lang_"):
         new_lang = action.split("_")[1]
         context.user_data["language"] = new_lang
-        set_user_language(user_id, new_lang)  # Save to database
+        set_user_language(user_id, new_lang)
         update_msg = "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*"
-        await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang))
+        await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang, user_id))
 
     elif action == "back_to_menu":
-        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+
+    elif action == "admin_menu":
+        if user_id != ADMIN_ID and not is_admin(user_id):
+            await query.answer("🚫 Admin only", show_alert=True)
+            return
+        await show_admin_panel(query, lang)
 
     else:
         unknown_msg = "إجراء غير معروف" if lang == "ar" else "Unknown action"
-        await query.edit_message_text(unknown_msg, reply_markup=build_menu_markup(lang))
+        await query.edit_message_text(unknown_msg, reply_markup=build_menu_markup(lang, user_id))
 
 
 async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
@@ -453,7 +465,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"], lang),
         parse_mode="Markdown",
-        reply_markup=build_menu_markup(lang),
+        reply_markup=build_menu_markup(lang, user_id),
     )
 
 
@@ -527,7 +539,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         build_products_list_message(products, lang),
         parse_mode="Markdown",
         disable_web_page_preview=True,
-        reply_markup=build_menu_markup(lang),
+        reply_markup=build_menu_markup(lang, user_id),
     )
 
 
@@ -558,13 +570,32 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     lang = context.user_data.get("language", "en")
 
     if context.user_data.get("awaiting_authorize_id"):
-        context.user_data["awaiting_authorize_id"] = False
         if update.message.text.strip().isdigit():
             target_id = int(update.message.text.strip())
-            add_authorized_user(target_id, f"User {target_id}")
-            await update.message.reply_text(f"✅ User {target_id} authorized!")
+            context.user_data["authorize_target_id"] = target_id
+            context.user_data["awaiting_authorize_id"] = False
+            context.user_data["awaiting_authorize_name"] = True
+            await update.message.reply_text(
+                "📝 *Step 2 of 2: Username*\n\n"
+                f"Now send me a display name for user {target_id}:\n\n"
+                "(Example: John, @username, etc.)"
+            )
         else:
-            await update.message.reply_text("❌ Invalid user ID")
+            await update.message.reply_text("❌ Invalid user ID. Please send only numbers.")
+        return
+
+    if context.user_data.get("awaiting_authorize_name"):
+        context.user_data["awaiting_authorize_name"] = False
+        target_id = context.user_data.pop("authorize_target_id", None)
+        if target_id:
+            username = update.message.text.strip()
+            add_authorized_user(target_id, username)
+            await update.message.reply_text(
+                f"✅ *User Authorized!*\n\n"
+                f"ID: `{target_id}`\n"
+                f"Name: {username}\n\n"
+                f"User can now use the bot."
+            )
         return
 
     if context.user_data.get("awaiting_revoke_id"):
@@ -620,6 +651,27 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
 
+async def show_admin_panel(query, lang: str = "en"):
+    keyboard = [
+        [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
+         InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
+        [InlineKeyboardButton("➕ Authorize User", callback_data="admin_authorize"),
+         InlineKeyboardButton("➖ Revoke User", callback_data="admin_revoke")],
+        [InlineKeyboardButton("◀ Back", callback_data="back_to_menu")],
+    ]
+
+    if lang == "ar":
+        msg = "⚙️ *لوحة الإدارة*\n\nاختر خيار:"
+    else:
+        msg = "⚙️ *Admin Panel*\n\nSelect an option:"
+
+    await query.edit_message_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID and not is_admin(user_id):
@@ -627,6 +679,11 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lang = context.user_data.get("language", "en")
+    await show_admin_panel(
+        type('Query', (), {'edit_message_text': update.message.reply_text})(),
+        lang
+    )
+
     keyboard = [
         [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
          InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
@@ -634,9 +691,9 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("➖ Revoke User", callback_data="admin_revoke")],
     ]
 
-    msg = "⚙️ *Admin Panel*\n\nSelect an option:"
+    msg = "⚙️ *Admin Panel*" if lang == "en" else "⚙️ *لوحة الإدارة*"
     await update.message.reply_text(
-        msg,
+        msg + "\n\nSelect an option:" if lang == "en" else msg + "\n\nاختر خيار:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -683,7 +740,8 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif action == "admin_authorize":
         context.user_data["awaiting_authorize_id"] = True
         await query.edit_message_text(
-            "📝 Send me the Telegram user ID to authorize:\n\n"
+            "📝 *Step 1 of 2: User ID*\n\n"
+            "Send me the Telegram user ID to authorize:\n\n"
             "(You can find user IDs using a bot debugger or check user info)"
         )
 
@@ -717,8 +775,8 @@ def main():
     app.add_handler(CommandHandler("check", check_now))
     app.add_handler(CommandHandler("admin", admin_menu))
 
-    app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_|back_to_menu)$"))
-    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^admin_"))
+    app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_|back_to_menu|admin_menu)$"))
+    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^admin_(users|stats|authorize|revoke)$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 

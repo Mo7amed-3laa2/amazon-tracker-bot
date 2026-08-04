@@ -266,11 +266,22 @@ def get_user_language(user_id: int) -> str:
 def set_user_language(user_id: int, language: str):
     """Save user's language preference."""
     with get_connection() as conn:
-        conn.execute(
-            "UPDATE authorized_users SET language = ? WHERE user_id = ?",
-            (language, user_id)
-        )
+        existing = conn.execute(
+            "SELECT id FROM authorized_users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                "UPDATE authorized_users SET language = ? WHERE user_id = ?",
+                (language, user_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO authorized_users (user_id, language, status) VALUES (?, ?, 'active')",
+                (user_id, language)
+            )
         conn.commit()
+        logger.info(f"[database] User {user_id} language set to {language}")
 
 
 def get_all_authorized_users_for_notification():
