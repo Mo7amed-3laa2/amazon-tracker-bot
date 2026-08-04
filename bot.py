@@ -277,12 +277,34 @@ def is_authorized(update: Update) -> bool:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
+
     if not is_authorized(update):
-        lang = "en"
-        msg = ("🚫 *Access Denied*\n\n"
-               "You are not authorized to use this bot.\n"
-               "Contact the admin to request access.")
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        keyboard = [
+            [InlineKeyboardButton("📋 Copy User ID", callback_data="copy_user_id")],
+            [InlineKeyboardButton("❓ Get Instructions", callback_data="get_instructions")],
+        ]
+
+        msg = (
+            f"🚫 *Access Denied*\n\n"
+            f"You are not authorized to use this bot yet.\n\n"
+            f"📍 *Your User ID:*\n`{user_id}`\n\n"
+            f"👤 *Your Username:*\n`@{username if username else 'Not set'}`\n\n"
+            f"📬 *To get access:*\n"
+            f"1. Copy your User ID above\n"
+            f"2. Contact the bot admin\n"
+            f"3. Send them your ID and desired display name\n"
+            f"4. They will authorize you!\n\n"
+            f"⏳ Once authorized, you'll be able to use all features."
+        )
+        await update.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        logger.info(f"[bot] Unauthorized access attempt from {user_id} ({first_name})")
         return
 
     user_id = update.effective_user.id
@@ -300,6 +322,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=build_menu_markup(lang, user_id)
     )
+
+
+async def handle_unauthorized_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    action = query.data
+
+    if action == "copy_user_id":
+        await query.answer("✅ User ID copied to clipboard!", show_alert=False)
+        msg = (
+            f"📋 *Your User ID*\n\n"
+            f"`{user_id}`\n\n"
+            f"👉 Click the code above to copy it, then send it to the admin."
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown")
+
+    elif action == "get_instructions":
+        await query.answer()
+        msg = (
+            f"📖 *How to Get Access*\n\n"
+            f"*Step 1:* Copy your User ID\n"
+            f"`{user_id}`\n\n"
+            f"*Step 2:* Find the admin\n"
+            f"Ask in the group chat or contact them directly\n\n"
+            f"*Step 3:* Send them:\n"
+            f"• Your User ID (above)\n"
+            f"• Your desired display name (e.g., 'Ahmed')\n\n"
+            f"*Step 4:* They will authorize you using `/admin`\n\n"
+            f"*Step 5:* Send `/start` again - you should now have access! ✅"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown")
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,16 +400,8 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
     elif action == "check":
-        if lang == "ar":
-            check_msg = "🔍 *جاري فحص الأسعار...*\n_جاري تحديث الأسعار من أمازون._"
-            done_msg = "✅ *تم تحديث جميع الأسعار!*\n\n_اعرض قائمتك لرؤية أحدث الأسعار._"
-        else:
-            check_msg = "🔍 *Checking all prices...*\n_Updating latest prices from Amazon._"
-            done_msg = "✅ *All prices updated!*\n\n_View your list to see the latest prices._"
-        await query.edit_message_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
         from scheduler import check_prices
         await check_prices(context.bot, CHAT_ID)
-        await query.edit_message_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
     elif action == "untrack":
         context.user_data["awaiting_untrack_id"] = True
@@ -393,8 +438,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         new_lang = action.split("_")[1]
         context.user_data["language"] = new_lang
         set_user_language(user_id, new_lang)
-        update_msg = "✅ *Language Updated*" if new_lang == "en" else "✅ *تم تحديث اللغة*"
-        await query.edit_message_text(update_msg, parse_mode="Markdown", reply_markup=build_menu_markup(new_lang, user_id))
+        await query.answer("✅ Language updated" if new_lang == "en" else "✅ تم تحديث اللغة")
 
     elif action == "back_to_menu":
         await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
@@ -434,12 +478,6 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
         return
 
-    if lang == "ar":
-        wait_msg = "🔍 جاري جلب تفاصيل المنتج...\n_يرجى الانتظار..._"
-    else:
-        wait_msg = "🔍 Fetching product details...\n_Please wait..._"
-    await update.message.reply_text(wait_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
-
     result = fetch_product(url, lang)
     if result is None:
         if lang == "ar":
@@ -465,7 +503,6 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"], lang),
         parse_mode="Markdown",
-        reply_markup=build_menu_markup(lang, user_id),
     )
 
 
@@ -494,10 +531,10 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
     remove_user_product(user_id, product_id)
     product_name = product[2]
     if lang == "ar":
-        msg = f"✅ *تمت الإزالة من المراقبة*\n\n_لم يعد قيد المراقبة:_\n📦 {product_name}"
+        msg = f"✅ تم إزالة {product_name}"
     else:
-        msg = f"✅ *Removed from tracking*\n\n_No longer monitoring:_\n📦 {product_name}"
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
+        msg = f"✅ Removed: {product_name}"
+    await update.message.reply_text(msg)
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,9 +602,71 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_untrack_id(update, context, context.args[0].strip())
 
 
+async def handle_admin_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin keyboard button presses."""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID and not is_admin(user_id):
+        return False
+
+    text = update.message.text.strip()
+    lang = context.user_data.get("language", "en")
+
+    if text == "👥 Users":
+        users = get_authorized_users()
+        if not users:
+            msg = "👥 *Authorized Users*\n\nNo users authorized yet."
+        else:
+            lines = ["👥 *Authorized Users*\n"]
+            for uid, username, is_admin_flag, auth_date in users:
+                admin_badge = "🔐" if is_admin_flag else "✅"
+                lines.append(f"{admin_badge} `{uid}` - {username}")
+            msg = "\n".join(lines)
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return True
+
+    elif text == "📊 Stats":
+        products = get_all_products()
+        users = get_authorized_users()
+        stats = (
+            f"📊 *Bot Statistics*\n\n"
+            f"👥 Authorized Users: {len(users)}\n"
+            f"📦 Total Products: {len(products)}\n"
+            f"⏱️ Check Interval: {INTERVAL} minutes\n"
+            f"🗄️ Database: Active"
+        )
+        await update.message.reply_text(stats, parse_mode="Markdown")
+        return True
+
+    elif text == "➕ Authorize":
+        context.user_data["awaiting_authorize_id"] = True
+        await update.message.reply_text("📝 Enter user ID:")
+        return True
+
+    elif text == "➖ Revoke":
+        context.user_data["awaiting_revoke_id"] = True
+        await update.message.reply_text("📝 Enter user ID:")
+        return True
+
+    elif text == "🏠 Main Menu":
+        context.user_data["in_admin_mode"] = False
+        from telegram import ReplyKeyboardRemove
+        await update.message.reply_text(
+            build_help_message(lang),
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(lang, user_id)
+        )
+        return True
+
+    return False
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = context.user_data.get("language", "en")
+
+    if context.user_data.get("in_admin_mode"):
+        if await handle_admin_keyboard(update, context):
+            return
 
     if context.user_data.get("awaiting_authorize_id"):
         if update.message.text.strip().isdigit():
@@ -575,13 +674,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data["authorize_target_id"] = target_id
             context.user_data["awaiting_authorize_id"] = False
             context.user_data["awaiting_authorize_name"] = True
-            await update.message.reply_text(
-                "📝 *Step 2 of 2: Username*\n\n"
-                f"Now send me a display name for user {target_id}:\n\n"
-                "(Example: John, @username, etc.)"
-            )
+            await update.message.reply_text(f"📝 Enter display name for {target_id}:")
         else:
-            await update.message.reply_text("❌ Invalid user ID. Please send only numbers.")
+            await update.message.reply_text("❌ Invalid ID")
         return
 
     if context.user_data.get("awaiting_authorize_name"):
@@ -590,12 +685,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if target_id:
             username = update.message.text.strip()
             add_authorized_user(target_id, username)
-            await update.message.reply_text(
-                f"✅ *User Authorized!*\n\n"
-                f"ID: `{target_id}`\n"
-                f"Name: {username}\n\n"
-                f"User can now use the bot."
-            )
+            await update.message.reply_text(f"✅ User {username} authorized!")
         return
 
     if context.user_data.get("awaiting_revoke_id"):
@@ -603,12 +693,29 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if update.message.text.strip().isdigit():
             target_id = int(update.message.text.strip())
             remove_authorized_user(target_id)
-            await update.message.reply_text(f"✅ User {target_id} revoked!")
+            await update.message.reply_text(f"✅ Revoked: {target_id}")
         else:
-            await update.message.reply_text("❌ Invalid user ID")
+            await update.message.reply_text("❌ Invalid ID")
         return
 
     if not is_authorized(update):
+        user_id = update.effective_user.id
+        keyboard = [
+            [InlineKeyboardButton("📋 Copy User ID", callback_data="copy_user_id")],
+            [InlineKeyboardButton("❓ Get Instructions", callback_data="get_instructions")],
+        ]
+
+        msg = (
+            f"🚫 *Not Authorized*\n\n"
+            f"Your User ID: `{user_id}`\n\n"
+            f"Please contact the admin to request access.\n"
+            f"Send them your User ID and desired display name."
+        )
+        await update.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     if context.user_data.get("awaiting_track_url"):
@@ -633,22 +740,51 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
 
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID and not is_admin(user_id):
+        await update.message.reply_text("🚫 Admin only")
+        return
+
+    users = get_authorized_users()
+    if not users:
+        msg = "👥 *Authorized Users*\n\nNo users authorized yet."
+    else:
+        lines = ["👥 *Authorized Users* (" + str(len(users)) + ")\n"]
+        for uid, username, is_admin_flag, auth_date in users:
+            admin_badge = "🔐 Admin" if is_admin_flag else "✅ User"
+            lines.append(f"\n{admin_badge}\n`{uid}`\nName: {username}")
+        msg = "\n".join(lines)
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID and not is_admin(user_id):
+        await update.message.reply_text("🚫 Admin only")
+        return
+
+    products = get_all_products()
+    users = get_authorized_users()
+
+    stats = (
+        f"📊 *Bot Statistics*\n\n"
+        f"👥 *Authorized Users:* {len(users)}\n"
+        f"📦 *Total Products:* {len(products)}\n"
+        f"⏱️ *Check Interval:* {INTERVAL} minutes\n"
+        f"🗄️ *Database:* Active\n"
+        f"🔄 *Scheduler:* Running"
+    )
+    await update.message.reply_text(stats, parse_mode="Markdown")
+
+
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
-    lang = context.user_data.get("language", "en")
-    if lang == "ar":
-        check_msg = "🔍 *جاري فحص الأسعار...*\n_يرجى الانتظار أثناء تحديث جميع الأسعار._"
-        done_msg = "✅ *فحص الأسعار مكتمل!*\n\n_تحقق من القائمة لرؤية أحدث الأسعار._"
-    else:
-        check_msg = "🔍 *Checking prices...*\n_Please wait while I update all prices._"
-        done_msg = "✅ *Price check complete!*\n\n_Check the list to see the latest prices._"
-
-    await update.message.reply_text(check_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
     from scheduler import check_prices
     await check_prices(context.bot, CHAT_ID)
-    await update.message.reply_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
 
 async def show_admin_panel(query, lang: str = "en"):
@@ -672,6 +808,17 @@ async def show_admin_panel(query, lang: str = "en"):
     )
 
 
+def get_admin_keyboard():
+    """Return persistent admin keyboard."""
+    keyboard = [
+        ["👥 Users", "📊 Stats"],
+        ["➕ Authorize", "➖ Revoke"],
+        ["🏠 Main Menu"]
+    ]
+    from telegram import ReplyKeyboardMarkup
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID and not is_admin(user_id):
@@ -679,23 +826,11 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lang = context.user_data.get("language", "en")
-    await show_admin_panel(
-        type('Query', (), {'edit_message_text': update.message.reply_text})(),
-        lang
-    )
+    context.user_data["in_admin_mode"] = True
 
-    keyboard = [
-        [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-         InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
-        [InlineKeyboardButton("➕ Authorize User", callback_data="admin_authorize"),
-         InlineKeyboardButton("➖ Revoke User", callback_data="admin_revoke")],
-    ]
-
-    msg = "⚙️ *Admin Panel*" if lang == "en" else "⚙️ *لوحة الإدارة*"
     await update.message.reply_text(
-        msg + "\n\nSelect an option:" if lang == "en" else msg + "\n\nاختر خيار:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "⚙️ Admin Mode",
+        reply_markup=get_admin_keyboard()
     )
 
 
@@ -739,17 +874,11 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif action == "admin_authorize":
         context.user_data["awaiting_authorize_id"] = True
-        await query.edit_message_text(
-            "📝 *Step 1 of 2: User ID*\n\n"
-            "Send me the Telegram user ID to authorize:\n\n"
-            "(You can find user IDs using a bot debugger or check user info)"
-        )
+        await query.edit_message_text("📝 Enter user ID to authorize:")
 
     elif action == "admin_revoke":
         context.user_data["awaiting_revoke_id"] = True
-        await query.edit_message_text(
-            "📝 Send me the Telegram user ID to revoke:"
-        )
+        await query.edit_message_text("📝 Enter user ID to revoke:")
 
 
 async def post_init(application):
@@ -774,7 +903,10 @@ def main():
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("check", check_now))
     app.add_handler(CommandHandler("admin", admin_menu))
+    app.add_handler(CommandHandler("users", admin_users))
+    app.add_handler(CommandHandler("stats", admin_stats))
 
+    app.add_handler(CallbackQueryHandler(handle_unauthorized_request, pattern="^(copy_user_id|get_instructions)$"))
     app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_|back_to_menu|admin_menu)$"))
     app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^admin_(users|stats|authorize|revoke)$"))
 
