@@ -1,6 +1,10 @@
 import cloudscraper
 from bs4 import BeautifulSoup
 import re
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
@@ -16,44 +20,57 @@ HEADERS = {
 scraper = cloudscraper.create_scraper()
 
 
-def fetch_product(url: str, lang: str = "en") -> dict | None:
+def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | None:
     """
     Scrape an Amazon product page and return name, price, specs, and image.
-    Supports multiple languages by parsing the page content.
+    Includes retry logic with exponential backoff.
 
     Args:
         url: Amazon product URL
         lang: Language code ('en' or 'ar')
+        retry_count: Internal retry counter (don't set manually)
 
     Returns None if the page could not be parsed.
     """
+    MAX_RETRIES = 2
+
     try:
         response = scraper.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
     except Exception as e:
-        print(f"[scraper] Request failed for {url}: {e}")
+        if retry_count < MAX_RETRIES:
+            wait_time = 2 ** retry_count
+            logger.warning(f"[scraper] Request failed, retrying in {wait_time}s: {e}")
+            time.sleep(wait_time)
+            return fetch_product(url, lang, retry_count + 1)
+        logger.error(f"[scraper] Request failed after {MAX_RETRIES + 1} attempts for {url}: {e}")
         return None
 
-    soup = BeautifulSoup(response.text, "lxml")
+    try:
+        soup = BeautifulSoup(response.text, "lxml")
 
-    name = _extract_name(soup, lang)
-    price = _extract_price(soup)
-    image_url = _extract_image(soup)
-    description = _extract_description(soup, lang)
-    specs = _extract_specs(soup, lang)
+        name = _extract_name(soup, lang)
+        price = _extract_price(soup)
+        image_url = _extract_image(soup)
+        description = _extract_description(soup, lang)
+        specs = _extract_specs(soup, lang)
 
-    if price is None:
-        print(f"[scraper] Could not find price for: {url}")
+        if price is None:
+            logger.error(f"[scraper] Could not find price for: {url}")
+            return None
+
+        logger.info(f"[scraper] Successfully fetched {name[:30]}... (EGP {price:,.2f})")
+        return {
+            "name": name,
+            "price": price,
+            "image": image_url,
+            "description": description,
+            "specs": specs,
+            "language": lang,
+        }
+    except Exception as e:
+        logger.error(f"[scraper] Error parsing page for {url}: {e}")
         return None
-
-    return {
-        "name": name,
-        "price": price,
-        "image": image_url,
-        "description": description,
-        "specs": specs,
-        "language": lang,
-    }
 
 
 def _extract_name(soup: BeautifulSoup, lang: str = "en") -> str:

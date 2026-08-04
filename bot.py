@@ -12,9 +12,10 @@ from telegram.ext import (
     filters,
 )
 from database import (
-    init_db, add_product, get_all_products, remove_product, get_product_by_id,
+    init_db, add_product, add_user_product, remove_user_product, get_all_products,
+    get_user_products, remove_product, get_product_by_id, get_product_by_url,
     is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
-    get_authorized_users, get_user_language, set_user_language
+    get_authorized_users, get_user_language, set_user_language, get_price_history
 )
 from scraper import fetch_product
 from scheduler import start_scheduler
@@ -25,16 +26,6 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ADMIN_ID = int(CHAT_ID) if CHAT_ID else None
 INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
-
-
-def is_user_auth(user_id: int) -> bool:
-    """Check if user is authorized."""
-    return user_id == ADMIN_ID or is_user_authorized(user_id)
-
-
-def is_user_admin(user_id: int) -> bool:
-    """Check if user is admin."""
-    return user_id == ADMIN_ID or is_admin(user_id)
 
 TRANSLATIONS = {
     "en": {
@@ -147,6 +138,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# Avoid leaking bot token in HTTP request URLs at INFO level.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -272,19 +265,30 @@ def is_valid_amazon_url(url: str) -> bool:
 
 
 def is_authorized(update: Update) -> bool:
-    """Only allow messages from the configured chat ID."""
-    return str(update.effective_chat.id) == str(CHAT_ID)
+    """Check if user is authorized (admin or authorized user)."""
+    user_id = update.effective_user.id
+    return user_id == ADMIN_ID or is_user_authorized(user_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
+        lang = "en"
+        msg = ("🚫 *Access Denied*\n\n"
+               "You are not authorized to use this bot.\n"
+               "Contact the admin to request access.")
+        await update.message.reply_text(msg, parse_mode="Markdown")
         return
+
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
 
     if "language" not in context.user_data:
         context.user_data["language"] = get_user_language(user_id)
+
     context.user_data["awaiting_track_url"] = False
     context.user_data["awaiting_untrack_id"] = False
     lang = context.user_data["language"]
+
     await update.message.reply_text(
         build_help_message(lang),
         parse_mode="Markdown",
@@ -299,6 +303,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
+    user_id = update.effective_user.id
     lang = context.user_data.get("language", "en")
     action = query.data
 
@@ -320,7 +325,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
     elif action == "list":
-        products = get_all_products()
+        products = get_user_products(user_id)
         if not products:
             if lang == "ar":
                 msg = "📦 *منتجاتك المتتبعة*\n\n_لم تضف أي منتجات بعد._\n\nاستخدم 📦 لإضافة أول منتج!"
@@ -394,6 +399,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    user_id = update.effective_user.id
     lang = context.user_data.get("language", "en")
 
     if not url:
@@ -441,7 +447,9 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
         return
 
-    add_product(url, result["name"], result["price"], result.get("image"))
+    product_id = add_product(url, result["name"], result["price"], result.get("image"))
+    add_user_product(user_id, product_id)
+
     await update.message.reply_text(
         build_tracking_success_message(result["name"], result["price"], lang),
         parse_mode="Markdown",
@@ -450,6 +458,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id_text: str):
+    user_id = update.effective_user.id
     lang = context.user_data.get("language", "en")
 
     if not product_id_text.isdigit():
@@ -470,7 +479,7 @@ async def process_untrack_id(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
         return
 
-    remove_product(product_id)
+    remove_user_product(user_id, product_id)
     product_name = product[2]
     if lang == "ar":
         msg = f"✅ *تمت الإزالة من المراقبة*\n\n_لم يعد قيد المراقبة:_\n📦 {product_name}"
@@ -499,8 +508,9 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
+    user_id = update.effective_user.id
     lang = context.user_data.get("language", "en")
-    products = get_all_products()
+    products = get_user_products(user_id)
     if not products:
         if lang == "ar":
             msg = ("📦 *لا توجد منتجات مراقبة حتى الآن*\n\n"
@@ -544,10 +554,31 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    user_id = update.effective_user.id
+    lang = context.user_data.get("language", "en")
+
+    if context.user_data.get("awaiting_authorize_id"):
+        context.user_data["awaiting_authorize_id"] = False
+        if update.message.text.strip().isdigit():
+            target_id = int(update.message.text.strip())
+            add_authorized_user(target_id, f"User {target_id}")
+            await update.message.reply_text(f"✅ User {target_id} authorized!")
+        else:
+            await update.message.reply_text("❌ Invalid user ID")
         return
 
-    lang = context.user_data.get("language", "en")
+    if context.user_data.get("awaiting_revoke_id"):
+        context.user_data["awaiting_revoke_id"] = False
+        if update.message.text.strip().isdigit():
+            target_id = int(update.message.text.strip())
+            remove_authorized_user(target_id)
+            await update.message.reply_text(f"✅ User {target_id} revoked!")
+        else:
+            await update.message.reply_text("❌ Invalid user ID")
+        return
+
+    if not is_authorized(update):
+        return
 
     if context.user_data.get("awaiting_track_url"):
         context.user_data["awaiting_track_url"] = False
@@ -589,7 +620,82 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(done_msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang))
 
 
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID and not is_admin(user_id):
+        await update.message.reply_text("🚫 Admin only")
+        return
+
+    lang = context.user_data.get("language", "en")
+    keyboard = [
+        [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
+         InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
+        [InlineKeyboardButton("➕ Authorize User", callback_data="admin_authorize"),
+         InlineKeyboardButton("➖ Revoke User", callback_data="admin_revoke")],
+    ]
+
+    msg = "⚙️ *Admin Panel*\n\nSelect an option:"
+    await update.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID and not is_admin(user_id):
+        await update.callback_query.answer("🚫 Admin only", show_alert=True)
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+
+    if action == "admin_users":
+        users = get_authorized_users()
+        if not users:
+            await query.edit_message_text("👥 *Authorized Users*\n\nNo users authorized yet.")
+            return
+
+        lines = ["👥 *Authorized Users*\n"]
+        for user_id_item, username, is_admin_flag, auth_date in users:
+            admin_badge = "🔐" if is_admin_flag else "✅"
+            lines.append(f"{admin_badge} `{user_id_item}` - {username}")
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="Markdown"
+        )
+
+    elif action == "admin_stats":
+        products = get_all_products()
+        users = get_authorized_users()
+        stats = (
+            f"📊 *Bot Statistics*\n\n"
+            f"👥 Authorized Users: {len(users)}\n"
+            f"📦 Total Products: {len(products)}\n"
+            f"⏱️ Check Interval: {INTERVAL} minutes"
+        )
+        await query.edit_message_text(stats, parse_mode="Markdown")
+
+    elif action == "admin_authorize":
+        context.user_data["awaiting_authorize_id"] = True
+        await query.edit_message_text(
+            "📝 Send me the Telegram user ID to authorize:\n\n"
+            "(You can find user IDs using a bot debugger or check user info)"
+        )
+
+    elif action == "admin_revoke":
+        context.user_data["awaiting_revoke_id"] = True
+        await query.edit_message_text(
+            "📝 Send me the Telegram user ID to revoke:"
+        )
+
+
 async def post_init(application):
+    add_authorized_user(ADMIN_ID, "Admin", True)
     start_scheduler(application.bot, CHAT_ID, INTERVAL)
 
 
@@ -609,7 +715,11 @@ def main():
     app.add_handler(CommandHandler("list", list_products))
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("check", check_now))
-    app.add_handler(CallbackQueryHandler(handle_menu_button))
+    app.add_handler(CommandHandler("admin", admin_menu))
+
+    app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_|back_to_menu)$"))
+    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^admin_"))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Bot is running...")
