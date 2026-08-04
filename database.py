@@ -1,20 +1,41 @@
 import sqlite3
 import os
 import logging
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "tracker.db"))
 
 
+@contextmanager
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    """Yield a connection that is committed on success and always closed.
+
+    sqlite3's own context manager commits or rolls back but never closes, so
+    `with sqlite3.connect(...)` leaks a handle on every call — which adds up
+    fast in a long-running bot. timeout=30 sets busy_timeout so the bot and the
+    scheduler wait for each other instead of raising "database is locked".
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
     with get_connection() as conn:
+        # WAL lets the scheduler read while the bot writes instead of the two
+        # blocking each other. It is a persistent property of the file, so this
+        # only has to be set once, but re-running it is harmless.
+        conn.execute("PRAGMA journal_mode=WAL")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,8 +110,9 @@ def add_product(url: str, name: str, price: float, image_url: str | None = None)
             "SELECT id FROM products WHERE url = ?", (url,)
         ).fetchone()[0]
 
-        add_price_to_history(product_id, price)
-        conn.commit()
+        # Reuse this connection — opening a second one here would wait on the
+        # write lock this one already holds and deadlock until it times out.
+        _insert_price_history(conn, product_id, price)
         return product_id
 
 
@@ -146,23 +168,35 @@ def update_price(url: str, new_price: float):
                 "UPDATE products SET previous_price = last_price, last_price = ? WHERE url = ?",
                 (new_price, url),
             )
-            add_price_to_history(product[0], new_price)
-        conn.commit()
+            # Same connection, same reason as add_product — see _insert_price_history.
+            _insert_price_history(conn, product[0], new_price)
+
+
+def _insert_price_history(conn, product_id: int, price: float):
+    """Append a price point using a caller-supplied connection.
+
+    Callers that already hold a write transaction MUST use this rather than
+    add_price_to_history, which opens its own connection and would deadlock
+    against the lock the caller is holding.
+    """
+    conn.execute(
+        "INSERT INTO price_history (product_id, price) VALUES (?, ?)",
+        (product_id, price),
+    )
 
 
 def add_price_to_history(product_id: int, price: float):
     with get_connection() as conn:
-        conn.execute(
-            "INSERT INTO price_history (product_id, price) VALUES (?, ?)",
-            (product_id, price),
-        )
-        conn.commit()
+        _insert_price_history(conn, product_id, price)
 
 
 def get_price_history(product_id: int, limit: int = 30):
     with get_connection() as conn:
+        # Tie-break on id: recorded_at only has second granularity, so two points
+        # logged in the same second would otherwise come back in arbitrary order.
         rows = conn.execute(
-            "SELECT price, recorded_at FROM price_history WHERE product_id = ? ORDER BY recorded_at DESC LIMIT ?",
+            "SELECT price, recorded_at FROM price_history WHERE product_id = ? "
+            "ORDER BY recorded_at DESC, id DESC LIMIT ?",
             (product_id, limit),
         ).fetchall()
     return [tuple(row) for row in rows]
