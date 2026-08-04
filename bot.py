@@ -621,7 +621,7 @@ async def handle_admin_keyboard(update: Update, context: ContextTypes.DEFAULT_TY
                 admin_badge = "🔐" if is_admin_flag else "✅"
                 lines.append(f"{admin_badge} `{uid}` - {username}")
             msg = "\n".join(lines)
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
         return True
 
     elif text == "📊 Stats":
@@ -634,17 +634,17 @@ async def handle_admin_keyboard(update: Update, context: ContextTypes.DEFAULT_TY
             f"⏱️ Check Interval: {INTERVAL} minutes\n"
             f"🗄️ Database: Active"
         )
-        await update.message.reply_text(stats, parse_mode="Markdown")
+        await update.message.reply_text(stats, parse_mode="Markdown", reply_markup=get_admin_keyboard())
         return True
 
     elif text == "➕ Authorize":
         context.user_data["awaiting_authorize_id"] = True
-        await update.message.reply_text("📝 Enter user ID:")
+        await update.message.reply_text("📝 Enter user ID:", reply_markup=get_admin_keyboard())
         return True
 
     elif text == "➖ Revoke":
         context.user_data["awaiting_revoke_id"] = True
-        await update.message.reply_text("📝 Enter user ID:")
+        await update.message.reply_text("📝 Enter user ID:", reply_markup=get_admin_keyboard())
         return True
 
     elif text == "🏠 Main Menu":
@@ -756,7 +756,13 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"\n{admin_badge}\n`{uid}`\nName: {username}")
         msg = "\n".join(lines)
 
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    from telegram import ReplyKeyboardMarkup
+    keyboard = [
+        ["👥 Users", "📊 Stats"],
+        ["➕ Authorize", "➖ Revoke"],
+        ["🏠 Main Menu"]
+    ]
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -776,7 +782,13 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗄️ *Database:* Active\n"
         f"🔄 *Scheduler:* Running"
     )
-    await update.message.reply_text(stats, parse_mode="Markdown")
+    from telegram import ReplyKeyboardMarkup
+    keyboard = [
+        ["👥 Users", "📊 Stats"],
+        ["➕ Authorize", "➖ Revoke"],
+        ["🏠 Main Menu"]
+    ]
+    await update.message.reply_text(stats, parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
