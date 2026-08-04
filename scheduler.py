@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
@@ -97,7 +98,9 @@ async def check_prices(bot: Bot, chat_id: str):
         product_name = product_data[2]
         last_price = product_data[3]
 
-        result = fetch_product(url)
+        # Blocking network I/O — keep it off the event loop so the bot stays
+        # responsive while a scheduled sweep is running.
+        result = await asyncio.to_thread(fetch_product, url)
         if result is None:
             logger.warning(f"[scheduler] Could not fetch: {url}")
             continue

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -414,7 +415,19 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif action == "check":
         from scheduler import check_prices
+
+        if lang == "ar":
+            checking = "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بعض الوقت._"
+            done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
+        else:
+            checking = "🔍 *Checking prices...*\n\n_This can take a while._"
+            done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
+
+        await query.edit_message_text(checking, parse_mode="Markdown")
         await check_prices(context.bot, CHAT_ID)
+        await query.edit_message_text(
+            done, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id)
+        )
 
     elif action == "untrack":
         context.user_data["awaiting_untrack_id"] = True
@@ -497,7 +510,16 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
-    result = fetch_product(url, lang)
+    if lang == "ar":
+        waiting = "🔍 *جاري جلب بيانات المنتج...*\n\n_قد يستغرق هذا حتى دقيقة._"
+    else:
+        waiting = "🔍 *Getting the product info...*\n\n_This can take up to a minute._"
+    status = await update.message.reply_text(waiting, parse_mode="Markdown")
+
+    # fetch_product does blocking network I/O with retries and sleeps; running it
+    # on the event loop would freeze the bot for every user until it finishes.
+    result = await asyncio.to_thread(fetch_product, url, lang)
+
     if result is None:
         if lang == "ar":
             msg = ("⚠️ *تعذر جلب المنتج*\n\n"
@@ -513,13 +535,13 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                    "• Copy the link from your browser address bar\n"
                    "• Wait a moment and try again\n"
                    "• Check the product still exists")
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+        await status.edit_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
     product_id = add_product(url, result["name"], result["price"], result.get("image"))
     add_user_product(user_id, product_id)
 
-    await update.message.reply_text(
+    await status.edit_text(
         build_tracking_success_message(result["name"], result["price"], lang),
         parse_mode="Markdown",
     )
@@ -750,7 +772,19 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     from scheduler import check_prices
+
+    user_id = update.effective_user.id
+    lang = get_lang(context, user_id)
+    if lang == "ar":
+        checking = "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بعض الوقت._"
+        done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
+    else:
+        checking = "🔍 *Checking prices...*\n\n_This can take a while._"
+        done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
+
+    status = await update.message.reply_text(checking, parse_mode="Markdown")
     await check_prices(context.bot, CHAT_ID)
+    await status.edit_text(done, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
 
 async def show_admin_panel(update_or_query, lang: str = "en"):

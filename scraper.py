@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import re
 import logging
 import time
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -23,23 +24,19 @@ def _supported_encodings() -> str:
     return "gzip, deflate, br"
 
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
+# Deliberately no User-Agent here: cloudscraper generates a UA that matches the
+# TLS/cipher fingerprint it presents. Overriding the UA creates a mismatch
+# (Chrome header over a different fingerprint), which is itself a bot signal.
+BASE_HEADERS = {
     # Ask for English so prices come back in Western digits.
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": _supported_encodings(),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-User": "?1",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
     "Connection": "keep-alive",
 }
 
@@ -51,9 +48,92 @@ BOT_BLOCK_MARKERS = (
     "To discuss automated access to Amazon data",
     "Type the characters you see in this image",
     "/errors/validateCaptcha",
+    "Sorry, we just need to make sure you're not a robot",
 )
 
-scraper = cloudscraper.create_scraper()
+# A genuine product page is several hundred KB. Anything tiny is a block or
+# error interstitial even when it returns HTTP 200 and carries no marker.
+MIN_PRODUCT_PAGE_BYTES = 60_000
+
+# Rotated across attempts so a blocked fingerprint is not retried unchanged.
+BROWSER_PROFILES = (
+    {"browser": "chrome", "platform": "windows", "desktop": True},
+    {"browser": "firefox", "platform": "windows", "desktop": True},
+    {"browser": "chrome", "platform": "linux", "desktop": True},
+)
+
+ASIN_PATH_RE = re.compile(
+    r"/(?:dp|gp/product|gp/aw/d|product)/([A-Z0-9]{10})(?:[/?#]|$)", re.IGNORECASE
+)
+ASIN_QUERY_RE = re.compile(r"[?&]asin=([A-Z0-9]{10})", re.IGNORECASE)
+
+DEFAULT_ORIGIN = "https://www.amazon.eg"
+
+
+def _new_session(attempt: int = 0):
+    profile = BROWSER_PROFILES[attempt % len(BROWSER_PROFILES)]
+    return cloudscraper.create_scraper(browser=profile)
+
+
+def _origin(url: str) -> str:
+    parts = urlparse(url)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return DEFAULT_ORIGIN
+
+
+def _extract_asin(url: str) -> str | None:
+    match = ASIN_PATH_RE.search(url) or ASIN_QUERY_RE.search(url)
+    return match.group(1).upper() if match else None
+
+
+def _canonical_url(url: str) -> str | None:
+    """Rebuild a bare /dp/<ASIN> URL, dropping all tracking parameters.
+
+    Share links carry `ref=cm_sw_r_cso_...` and `social_share=...`, which are a
+    strong bot signal; requesting the clean canonical URL avoids them.
+    """
+    asin = _extract_asin(url)
+    if not asin:
+        return None
+    return f"{_origin(url)}/dp/{asin}"
+
+
+def _headers_for(origin: str) -> dict:
+    headers = dict(BASE_HEADERS)
+    headers["Referer"] = origin + "/"
+    return headers
+
+
+def _warm_up(session, origin: str) -> None:
+    """Fetch the storefront first so the session carries real Amazon cookies.
+
+    A cold request straight to /dp/<ASIN> with no session cookies is one of the
+    most reliable ways to trigger the bot check.
+    """
+    try:
+        session.get(origin + "/", headers=_headers_for(origin), timeout=20)
+        logger.debug(f"[scraper] Warmed session on {origin} ({len(session.cookies)} cookies)")
+    except Exception as e:
+        logger.debug(f"[scraper] Warm-up on {origin} failed (continuing): {e}")
+
+
+def _is_blocked(html: str) -> bool:
+    if any(marker in html for marker in BOT_BLOCK_MARKERS):
+        return True
+    return len(html) < MIN_PRODUCT_PAGE_BYTES and "productTitle" not in html
+
+
+def _resolve_short_link(session, url: str) -> str:
+    """Follow amzn.eu / amzn.to / a.co redirects to the real product URL."""
+    try:
+        response = session.get(
+            url, headers=_headers_for(_origin(url)), timeout=25, allow_redirects=True
+        )
+        return str(response.url)
+    except Exception as e:
+        logger.debug(f"[scraper] Could not resolve short link {url}: {e}")
+        return url
 
 
 def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | None:
@@ -68,42 +148,70 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
 
     Returns None if the page could not be parsed.
     """
-    MAX_RETRIES = 2
+    MAX_ATTEMPTS = 3
 
-    try:
-        response = scraper.get(url, headers=HEADERS, timeout=25)
-        response.raise_for_status()
-    except Exception as e:
-        if retry_count < MAX_RETRIES:
-            wait_time = 2 ** retry_count
-            logger.warning(f"[scraper] Request failed, retrying in {wait_time}s: {e}")
-            time.sleep(wait_time)
-            return fetch_product(url, lang, retry_count + 1)
-        logger.error(f"[scraper] Request failed after {MAX_RETRIES + 1} attempts for {url}: {e}")
-        return None
+    # Resolve short links once, then request the clean canonical /dp/<ASIN> URL
+    # so no share-tracking parameters are ever sent.
+    target = url
+    if not _extract_asin(target):
+        target = _resolve_short_link(_new_session(0), target)
+    canonical = _canonical_url(target)
+    if canonical:
+        if canonical != target:
+            logger.info(f"[scraper] Using canonical URL {canonical}")
+        target = canonical
+    else:
+        logger.warning(f"[scraper] No ASIN found in {url}; requesting as-is")
 
-    html = response.text
+    html = None
+    for attempt in range(MAX_ATTEMPTS):
+        session = _new_session(attempt)
+        origin = _origin(target)
+        _warm_up(session, origin)
 
-    logger.info(
-        f"[scraper] GET {response.status_code} | "
-        f"encoding={response.headers.get('Content-Encoding') or 'none'} | "
-        f"bytes={len(html)} | final_url={response.url}"
-    )
+        try:
+            response = session.get(target, headers=_headers_for(origin), timeout=30)
+            response.raise_for_status()
+        except Exception as e:
+            logger.warning(f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} request failed: {e}")
+            html = None
+            if attempt + 1 < MAX_ATTEMPTS:
+                time.sleep(2 ** attempt)
+            continue
 
-    if any(marker in html for marker in BOT_BLOCK_MARKERS):
-        if retry_count < MAX_RETRIES:
-            wait_time = 3 * (retry_count + 1)
-            logger.warning(f"[scraper] Amazon returned a bot check, retrying in {wait_time}s")
-            time.sleep(wait_time)
-            return fetch_product(url, lang, retry_count + 1)
-        logger.error(f"[scraper] Amazon is serving a bot check (captcha) for {url}")
-        return None
+        body = response.text
+        logger.info(
+            f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} GET {response.status_code} | "
+            f"encoding={response.headers.get('Content-Encoding') or 'none'} | "
+            f"bytes={len(body)} | final_url={response.url}"
+        )
 
-    if not _looks_like_html(html):
+        if _is_blocked(body):
+            logger.warning(
+                f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} hit a bot check "
+                f"({len(body)} bytes) — rotating browser fingerprint"
+            )
+            html = None
+            if attempt + 1 < MAX_ATTEMPTS:
+                time.sleep(3 * (attempt + 1))
+            continue
+
+        if not _looks_like_html(body):
+            logger.error(
+                f"[scraper] Response body is not readable HTML "
+                f"(encoding={response.headers.get('Content-Encoding')}). "
+                f"First 80 chars: {body[:80]!r}"
+            )
+            html = None
+            continue
+
+        html = body
+        break
+
+    if html is None:
         logger.error(
-            f"[scraper] Response body is not readable HTML "
-            f"(encoding={response.headers.get('Content-Encoding')}). "
-            f"First 80 chars: {html[:80]!r}"
+            f"[scraper] Giving up on {url} after {MAX_ATTEMPTS} attempts — "
+            f"Amazon is blocking this host's IP."
         )
         return None
 
