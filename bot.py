@@ -181,8 +181,8 @@ def build_menu_markup(lang: str = "en", user_id: int | None = None) -> InlineKey
         ],
     ]
 
-    is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
-    if is_admin:
+    user_is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
+    if user_is_admin:
         admin_btn = "⚙️ إدارة" if lang == "ar" else "⚙️ Admin"
         keyboard.append([InlineKeyboardButton(admin_btn, callback_data="admin_menu")])
 
@@ -447,7 +447,13 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if user_id != ADMIN_ID and not is_admin(user_id):
             await query.answer("🚫 Admin only", show_alert=True)
             return
-        await show_admin_panel(query, lang)
+        context.user_data["in_admin_mode"] = True
+        from telegram import ReplyKeyboardRemove
+        await query.edit_message_text("⚙️ Entering Admin Mode...")
+        await query.message.reply_text(
+            "Select option:",
+            reply_markup=get_admin_keyboard()
+        )
 
     else:
         unknown_msg = "إجراء غير معروف" if lang == "ar" else "Unknown action"
@@ -653,6 +659,11 @@ async def handle_admin_keyboard(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(
             build_help_message(lang),
             parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await update.message.reply_text(
+            "📋 Menu",
+            parse_mode="Markdown",
             reply_markup=build_menu_markup(lang, user_id)
         )
         return True
@@ -840,8 +851,13 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = context.user_data.get("language", "en")
     context.user_data["in_admin_mode"] = True
 
+    from telegram import ReplyKeyboardRemove
     await update.message.reply_text(
         "⚙️ Admin Mode",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await update.message.reply_text(
+        "Select option:",
         reply_markup=get_admin_keyboard()
     )
 
