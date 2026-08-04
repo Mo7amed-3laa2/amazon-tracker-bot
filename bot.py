@@ -438,7 +438,12 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         new_lang = action.split("_")[1]
         context.user_data["language"] = new_lang
         set_user_language(user_id, new_lang)
-        await query.answer("✅ Language updated" if new_lang == "en" else "✅ تم تحديث اللغة")
+
+        await query.edit_message_text(
+            build_help_message(new_lang),
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(new_lang, user_id)
+        )
 
     elif action == "back_to_menu":
         await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
@@ -608,95 +613,31 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_untrack_id(update, context, context.args[0].strip())
 
 
-async def handle_admin_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin keyboard button presses."""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID and not is_admin(user_id):
-        return False
-
-    text = update.message.text.strip()
-    lang = context.user_data.get("language", "en")
-
-    if text == "👥 Users":
-        users = get_authorized_users()
-        if not users:
-            msg = "👥 *Authorized Users*\n\nNo users authorized yet."
-        else:
-            lines = ["👥 *Authorized Users*\n"]
-            for uid, username, is_admin_flag, auth_date in users:
-                admin_badge = "🔐" if is_admin_flag else "✅"
-                lines.append(f"{admin_badge} `{uid}` - {username}")
-            msg = "\n".join(lines)
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
-        return True
-
-    elif text == "📊 Stats":
-        products = get_all_products()
-        users = get_authorized_users()
-        stats = (
-            f"📊 *Bot Statistics*\n\n"
-            f"👥 Authorized Users: {len(users)}\n"
-            f"📦 Total Products: {len(products)}\n"
-            f"⏱️ Check Interval: {INTERVAL} minutes\n"
-            f"🗄️ Database: Active"
-        )
-        await update.message.reply_text(stats, parse_mode="Markdown", reply_markup=get_admin_keyboard())
-        return True
-
-    elif text == "➕ Authorize":
-        context.user_data["awaiting_authorize_id"] = True
-        await update.message.reply_text("📝 Enter user ID:", reply_markup=get_admin_keyboard())
-        return True
-
-    elif text == "➖ Revoke":
-        context.user_data["awaiting_revoke_id"] = True
-        await update.message.reply_text("📝 Enter user ID:", reply_markup=get_admin_keyboard())
-        return True
-
-    elif text == "🏠 Main Menu":
-        context.user_data["in_admin_mode"] = False
-        from telegram import ReplyKeyboardRemove
-        await update.message.reply_text(
-            build_help_message(lang),
-            parse_mode="Markdown",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await update.message.reply_text(
-            "📋 Menu",
-            parse_mode="Markdown",
-            reply_markup=build_menu_markup(lang, user_id)
-        )
-        return True
-
-    return False
-
-
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = context.user_data.get("language", "en")
 
-    if context.user_data.get("in_admin_mode"):
-        if await handle_admin_keyboard(update, context):
-            return
+    if context.user_data.get("awaiting_authorize_name"):
+        username = update.message.text.strip()
+        context.user_data["authorize_username"] = username
+        context.user_data["awaiting_authorize_name"] = False
+        context.user_data["awaiting_authorize_id"] = True
+
+        keyboard = [[InlineKeyboardButton("◀ Cancel", callback_data="admin_menu")]]
+        msg = f"📝 Enter {username}'s Telegram user ID:" if lang == "en" else f"📝 أدخل معرف {username}:"
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
 
     if context.user_data.get("awaiting_authorize_id"):
         if update.message.text.strip().isdigit():
             target_id = int(update.message.text.strip())
-            context.user_data["authorize_target_id"] = target_id
+            username = context.user_data.pop("authorize_username", "User")
             context.user_data["awaiting_authorize_id"] = False
-            context.user_data["awaiting_authorize_name"] = True
-            await update.message.reply_text(f"📝 Enter display name for {target_id}:")
-        else:
-            await update.message.reply_text("❌ Invalid ID")
-        return
 
-    if context.user_data.get("awaiting_authorize_name"):
-        context.user_data["awaiting_authorize_name"] = False
-        target_id = context.user_data.pop("authorize_target_id", None)
-        if target_id:
-            username = update.message.text.strip()
             add_authorized_user(target_id, username)
-            await update.message.reply_text(f"✅ User {username} authorized!")
+            await update.message.reply_text(f"✅ {username} ({target_id}) authorized!")
+        else:
+            await update.message.reply_text("❌ Invalid ID. Please enter numbers only.")
         return
 
     if context.user_data.get("awaiting_revoke_id"):
@@ -810,7 +751,7 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_prices(context.bot, CHAT_ID)
 
 
-async def show_admin_panel(query, lang: str = "en"):
+async def show_admin_panel(update_or_query, lang: str = "en"):
     keyboard = [
         [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
          InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
@@ -819,27 +760,20 @@ async def show_admin_panel(query, lang: str = "en"):
         [InlineKeyboardButton("◀ Back", callback_data="back_to_menu")],
     ]
 
-    if lang == "ar":
-        msg = "⚙️ *لوحة الإدارة*\n\nاختر خيار:"
+    msg = "⚙️ *Admin Panel*" if lang == "en" else "⚙️ *لوحة الإدارة*"
+
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     else:
-        msg = "⚙️ *Admin Panel*\n\nSelect an option:"
-
-    await query.edit_message_text(
-        msg,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-def get_admin_keyboard():
-    """Return persistent admin keyboard."""
-    keyboard = [
-        ["👥 Users", "📊 Stats"],
-        ["➕ Authorize", "➖ Revoke"],
-        ["🏠 Main Menu"]
-    ]
-    from telegram import ReplyKeyboardMarkup
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+        await update_or_query.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -849,17 +783,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lang = context.user_data.get("language", "en")
-    context.user_data["in_admin_mode"] = True
-
-    from telegram import ReplyKeyboardRemove
-    await update.message.reply_text(
-        "⚙️ Admin Mode",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await update.message.reply_text(
-        "Select option:",
-        reply_markup=get_admin_keyboard()
-    )
+    await show_admin_panel(update, lang)
 
 
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -873,21 +797,23 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     action = query.data
 
+    lang = context.user_data.get("language", "en")
+
     if action == "admin_users":
         users = get_authorized_users()
         if not users:
-            await query.edit_message_text("👥 *Authorized Users*\n\nNo users authorized yet.")
+            keyboard = [[InlineKeyboardButton("◀ Back", callback_data="admin_menu")]]
+            await query.edit_message_text("👥 *Authorized Users*\n\nNo users authorized yet.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
-        lines = ["👥 *Authorized Users*\n"]
-        for user_id_item, username, is_admin_flag, auth_date in users:
+        lines = ["👥 *Authorized Users* (" + str(len(users)) + ")\n"]
+        keyboard = []
+        for uid, username, is_admin_flag, auth_date in users:
             admin_badge = "🔐" if is_admin_flag else "✅"
-            lines.append(f"{admin_badge} `{user_id_item}` - {username}")
+            lines.append(f"{admin_badge} {username}")
 
-        await query.edit_message_text(
-            "\n".join(lines),
-            parse_mode="Markdown"
-        )
+        keyboard.append([InlineKeyboardButton("◀ Back", callback_data="admin_menu")])
+        await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "admin_stats":
         products = get_all_products()
@@ -898,15 +824,42 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"📦 Total Products: {len(products)}\n"
             f"⏱️ Check Interval: {INTERVAL} minutes"
         )
-        await query.edit_message_text(stats, parse_mode="Markdown")
+        keyboard = [[InlineKeyboardButton("◀ Back", callback_data="admin_menu")]]
+        await query.edit_message_text(stats, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "admin_authorize":
-        context.user_data["awaiting_authorize_id"] = True
-        await query.edit_message_text("📝 Enter user ID to authorize:")
+        context.user_data["awaiting_authorize_name"] = True
+        keyboard = [[InlineKeyboardButton("◀ Cancel", callback_data="admin_menu")]]
+        msg = "📝 Enter user's display name:" if lang == "en" else "📝 أدخل اسم المستخدم:"
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "admin_revoke":
-        context.user_data["awaiting_revoke_id"] = True
-        await query.edit_message_text("📝 Enter user ID to revoke:")
+        users = get_authorized_users()
+        if not users:
+            keyboard = [[InlineKeyboardButton("◀ Back", callback_data="admin_menu")]]
+            await query.edit_message_text("❌ No users to revoke", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        keyboard = []
+        for uid, username, is_admin_flag, auth_date in users:
+            if not is_admin_flag:
+                keyboard.append([InlineKeyboardButton(f"❌ {username}", callback_data=f"revoke_{uid}")])
+
+        keyboard.append([InlineKeyboardButton("◀ Back", callback_data="admin_menu")])
+        msg = "Select user to revoke:" if lang == "en" else "اختر المستخدم للإزالة:"
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif action.startswith("revoke_"):
+        target_id = int(action.split("_")[1])
+        user_to_revoke = None
+        for uid, username, _, _ in get_authorized_users():
+            if uid == target_id:
+                user_to_revoke = username
+                break
+
+        if user_to_revoke:
+            remove_authorized_user(target_id)
+            await query.edit_message_text(f"✅ Revoked: {user_to_revoke}")
 
 
 async def post_init(application):
@@ -936,7 +889,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_unauthorized_request, pattern="^(copy_user_id|get_instructions)$"))
     app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_|back_to_menu|admin_menu)$"))
-    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^admin_(users|stats|authorize|revoke)$"))
+    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^(admin_|revoke_)"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
