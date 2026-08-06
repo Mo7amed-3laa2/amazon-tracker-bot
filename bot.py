@@ -225,7 +225,7 @@ def build_products_list_message(products, lang: str = "en") -> str:
         current_text = "Current"
         added_text = "Added"
 
-    for pid, url, name, last_price, prev_price, image_url, added_at in products:
+    for pid, url, name, last_price, prev_price, image_url, added_at, alert_threshold in products:
         current_str = f"EGP {last_price:,.2f}" if last_price is not None else "N/A"
 
         price_info = f"💰 {current_text}: `{current_str}`"
