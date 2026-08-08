@@ -401,31 +401,22 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                    "🔗 Full: `https://www.amazon.com.eg/...`\n"
                    "⚡ Short: `https://amzn.eu/d/00rKyOJw`\n\n"
                    "_Just paste the link and I'll add it to your list!_")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=msg,
-            parse_mode="Markdown"
-        )
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "list":
         products = get_user_products(user_id)
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
         if not products:
             if lang == "ar":
                 msg = "📦 *منتجاتك المتتبعة*\n\n_لم تضف أي منتجات بعد._\n\nاستخدم 📦 لإضافة أول منتج!"
             else:
                 msg = "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\nUse 📦 to add your first product!"
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=msg,
-                parse_mode="Markdown"
-            )
-            return
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=build_products_list_message(products, lang),
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-        )
+        else:
+            msg = build_products_list_message(products, lang)
+        await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "check":
         from scheduler import check_prices
@@ -437,18 +428,11 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             checking = "🔍 *Checking prices...*\n\n_This can take a while._"
             done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
 
-        checking_msg = await context.bot.send_message(
-            chat_id=user_id,
-            text=checking,
-            parse_mode="Markdown"
-        )
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text(checking, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         await check_prices(context.bot, CHAT_ID)
-        await context.bot.edit_message_text(
-            chat_id=user_id,
-            message_id=checking_msg.message_id,
-            text=done,
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(done, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "untrack":
         context.user_data["awaiting_untrack_id"] = True
@@ -461,18 +445,14 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg = ("❌ *Remove a product from tracking*\n\n"
                    "_Send me the product ID_ (use 🧾 to see your list first)\n"
                    "Example: `1` or `3`")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=msg,
-            parse_mode="Markdown"
-        )
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "help":
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=build_help_message(lang),
-            parse_mode="Markdown"
-        )
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "language":
         back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
@@ -487,12 +467,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg = "🌐 *اختر اللغة*\n\n_اختر لغتك المفضلة للروبوت:_"
         else:
             msg = "🌐 *Select Language*\n\n_Choose your preferred language for the bot:_"
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=msg,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(lang_keyboard)
-        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(lang_keyboard))
 
     elif action.startswith("lang_"):
         new_lang = action.split("_")[1]
@@ -502,21 +477,15 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if new_lang == "ar":
             msg = "✅ *تم تغيير اللغة إلى العربية*"
+            back_btn = "◀ العودة"
         else:
             msg = "✅ *Language changed to English*"
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=msg,
-            parse_mode="Markdown",
-        )
+            back_btn = "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "back_to_menu":
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=build_help_message(lang),
-            parse_mode="Markdown",
-            reply_markup=build_menu_markup(lang, user_id)
-        )
+        await query.edit_message_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
     elif action == "admin_menu":
         if user_id != ADMIN_ID and not is_admin(user_id):
