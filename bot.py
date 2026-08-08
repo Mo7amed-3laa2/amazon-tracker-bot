@@ -628,12 +628,21 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     lang = get_lang(context, user_id)
-    if not context.args:
-        if lang == "ar":
-            msg = "📦 *الاستخدام: /track* `<رابط-أمازون>`\n\nمثال:\n`/track https://amzn.eu/d/00rKyOJw`"
-        else:
-            msg = "📦 *Usage: /track* `<amazon-url>`\n\nExample:\n`/track https://amzn.eu/d/00rKyOJw`"
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+    context.user_data["awaiting_track_url"] = True
+    context.user_data["awaiting_untrack_id"] = False
+    if lang == "ar":
+        msg = ("📤 *أرسل لي رابط المنتج لتتبعه.*\n\n"
+               "_تنسيقات مدعومة:_\n"
+               "🔗 كامل: `https://www.amazon.com.eg/...`\n"
+               "⚡ مختصر: `https://amzn.eu/d/00rKyOJw`\n\n"
+               "_فقط ألصق الرابط وسأضيفه إلى قائمتك!_")
+    else:
+        msg = ("📤 *Send me the product link to track it.*\n\n"
+               "_Supported formats:_\n"
+               "🔗 Full: `https://www.amazon.com.eg/...`\n"
+               "⚡ Short: `https://amzn.eu/d/00rKyOJw`\n\n"
+               "_Just paste the link and I'll add it to your list!_")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -669,18 +678,17 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     lang = get_lang(context, user_id)
-    if not context.args:
-        if lang == "ar":
-            msg = ("🗑 *الاستخدام: /untrack* `<معرف-المنتج>`\n\n"
-                   "مثال:\n"
-                   "`/untrack 1`\n\n"
-                   "_استخدم /list لرؤية معرفات منتجاتك_")
-        else:
-            msg = ("🗑 *Usage: /untrack* `<product-id>`\n\n"
-                   "Example:\n"
-                   "`/untrack 1`\n\n"
-                   "_Use /list to see your product IDs_")
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+    context.user_data["awaiting_untrack_id"] = True
+    context.user_data["awaiting_track_url"] = False
+    if lang == "ar":
+        msg = ("❌ *إزالة منتج من المراقبة*\n\n"
+               "_أرسل لي معرّف المنتج_ (استخدم 🧾 لرؤية قائمتك أولاً)\n"
+               "مثال: `1` أو `3`")
+    else:
+        msg = ("❌ *Remove a product from tracking*\n\n"
+               "_Send me the product ID_ (use 🧾 to see your list first)\n"
+               "Example: `1` or `3`")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1050,7 +1058,8 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_(en|ar)|back_to_menu|admin_menu)$"))
     app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^(admin_|revoke_)"))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    # Temporarily disabled chat menu
+    # app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
