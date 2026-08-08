@@ -770,6 +770,50 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     text_lower = update.message.text.lower() if update.message.text else ""
+
+    keyboard_button_map = {
+        "en": {
+            "add product": "track",
+            "my products": "list",
+            "check now": "check",
+            "remove": "untrack",
+            "help & info": "help",
+            "language": "language",
+            "admin": "admin_menu",
+        },
+        "ar": {
+            "أضف منتج": "track",
+            "أضف": "track",
+            "منتجاتي": "list",
+            "قائمتي": "list",
+            "افحص الآن": "check",
+            "فحص": "check",
+            "إزالة": "untrack",
+            "حذف": "untrack",
+            "المساعدة": "help",
+            "مساعدة": "help",
+            "اللغة": "language",
+            "لغة": "language",
+            "إدارة": "admin_menu",
+            "ادارة": "admin_menu",
+        }
+    }
+
+    button_action = keyboard_button_map.get(lang, {}).get(text_lower)
+
+    if button_action:
+        fake_query = type('obj', (object,), {
+            'data': button_action,
+            'answer': lambda *args, **kwargs: None,
+            'edit_message_text': lambda *args, **kwargs: None
+        })()
+        fake_update = type('obj', (object,), {
+            'callback_query': fake_query,
+            'effective_user': update.effective_user
+        })()
+        await handle_menu_button(fake_update, context)
+        return
+
     if text_lower in {"menu", "main menu", "show menu", "start"}:
         await update.message.reply_text(build_help_message(lang), parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
@@ -1058,8 +1102,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_(en|ar)|back_to_menu|admin_menu)$"))
     app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^(admin_|revoke_)"))
 
-    # Temporarily disabled chat menu
-    # app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
