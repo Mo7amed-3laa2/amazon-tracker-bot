@@ -801,17 +801,105 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     button_action = keyboard_button_map.get(lang, {}).get(text_lower)
 
-    if button_action:
-        fake_query = type('obj', (object,), {
-            'data': button_action,
-            'answer': lambda *args, **kwargs: None,
-            'edit_message_text': lambda *args, **kwargs: None
-        })()
-        fake_update = type('obj', (object,), {
-            'callback_query': fake_query,
-            'effective_user': update.effective_user
-        })()
-        await handle_menu_button(fake_update, context)
+    if button_action == "track":
+        context.user_data["awaiting_track_url"] = True
+        context.user_data["awaiting_untrack_id"] = False
+        if lang == "ar":
+            msg = ("📤 *أرسل لي رابط المنتج لتتبعه.*\n\n"
+                   "_تنسيقات مدعومة:_\n"
+                   "🔗 كامل: `https://www.amazon.com.eg/...`\n"
+                   "⚡ مختصر: `https://amzn.eu/d/00rKyOJw`\n\n"
+                   "_فقط ألصق الرابط وسأضيفه إلى قائمتك!_")
+        else:
+            msg = ("📤 *Send me the product link to track it.*\n\n"
+                   "_Supported formats:_\n"
+                   "🔗 Full: `https://www.amazon.com.eg/...`\n"
+                   "⚡ Short: `https://amzn.eu/d/00rKyOJw`\n\n"
+                   "_Just paste the link and I'll add it to your list!_")
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+        return
+
+    elif button_action == "list":
+        products = get_user_products(user_id)
+        if not products:
+            if lang == "ar":
+                msg = "📦 *منتجاتك المتتبعة*\n\n_لم تضف أي منتجات بعد._\n\nاستخدم 📦 لإضافة أول منتج!"
+            else:
+                msg = "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\nUse 📦 to add your first product!"
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+            return
+        await update.message.reply_text(
+            build_products_list_message(products, lang),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=build_menu_markup(lang, user_id)
+        )
+        return
+
+    elif button_action == "check":
+        from scheduler import check_prices
+        if lang == "ar":
+            checking = "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بعض الوقت._"
+            done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
+        else:
+            checking = "🔍 *Checking prices...*\n\n_This can take a while._"
+            done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
+        checking_msg = await update.message.reply_text(checking, parse_mode="Markdown")
+        await check_prices(context.bot, CHAT_ID)
+        await context.bot.edit_message_text(
+            chat_id=user_id,
+            message_id=checking_msg.message_id,
+            text=done,
+            parse_mode="Markdown"
+        )
+        return
+
+    elif button_action == "untrack":
+        context.user_data["awaiting_untrack_id"] = True
+        context.user_data["awaiting_track_url"] = False
+        if lang == "ar":
+            msg = ("❌ *إزالة منتج من المراقبة*\n\n"
+                   "_أرسل لي معرّف المنتج_ (استخدم 🧾 لرؤية قائمتك أولاً)\n"
+                   "مثال: `1` أو `3`")
+        else:
+            msg = ("❌ *Remove a product from tracking*\n\n"
+                   "_Send me the product ID_ (use 🧾 to see your list first)\n"
+                   "Example: `1` or `3`")
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
+        return
+
+    elif button_action == "help":
+        await update.message.reply_text(
+            build_help_message(lang),
+            parse_mode="Markdown",
+            reply_markup=build_menu_markup(lang, user_id)
+        )
+        return
+
+    elif button_action == "language":
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        lang_keyboard = [
+            [
+                InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
+                InlineKeyboardButton("🇸🇦 العربية", callback_data="lang_ar"),
+            ],
+            [InlineKeyboardButton(back_btn, callback_data="back_to_menu")],
+        ]
+        if lang == "ar":
+            msg = "🌐 *اختر اللغة*\n\n_اختر لغتك المفضلة للروبوت:_"
+        else:
+            msg = "🌐 *Select Language*\n\n_Choose your preferred language for the bot:_"
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(lang_keyboard))
+        return
+
+    elif button_action == "admin_menu":
+        if user_id != ADMIN_ID and not is_admin(user_id):
+            if lang == "ar":
+                await update.message.reply_text("🚫 للمشرفين فقط", reply_markup=build_menu_markup(lang, user_id))
+            else:
+                await update.message.reply_text("🚫 Admin only", reply_markup=build_menu_markup(lang, user_id))
+            return
+        await show_admin_panel(update, lang)
         return
 
     if text_lower in {"menu", "main menu", "show menu", "start"}:
