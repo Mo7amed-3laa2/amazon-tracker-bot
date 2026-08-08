@@ -769,37 +769,64 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await process_untrack_id(update, context, update.message.text.strip())
         return
 
-    text_lower = update.message.text.lower() if update.message.text else ""
+    text_input = update.message.text.strip() if update.message.text else ""
+    text_lower = text_input.lower()
 
     keyboard_button_map = {
         "en": {
             "add product": "track",
+            "add": "track",
+            "📦 add product": "track",
             "my products": "list",
+            "my list": "list",
+            "🧾 my products": "list",
             "check now": "check",
+            "check": "check",
+            "🔎 check now": "check",
             "remove": "untrack",
+            "delete": "untrack",
+            "❌ remove": "untrack",
             "help & info": "help",
+            "help": "help",
+            "❓ help & info": "help",
             "language": "language",
+            "🌐 language": "language",
             "admin": "admin_menu",
+            "⚙️ admin": "admin_menu",
         },
         "ar": {
             "أضف منتج": "track",
             "أضف": "track",
+            "📦 أضف منتج": "track",
+            "📦 أضف": "track",
             "منتجاتي": "list",
             "قائمتي": "list",
+            "🧾 منتجاتي": "list",
+            "🧾 قائمتي": "list",
             "افحص الآن": "check",
             "فحص": "check",
+            "🔎 افحص الآن": "check",
+            "🔎 فحص": "check",
             "إزالة": "untrack",
             "حذف": "untrack",
+            "❌ إزالة": "untrack",
+            "❌ حذف": "untrack",
             "المساعدة": "help",
             "مساعدة": "help",
+            "❓ المساعدة": "help",
+            "❓ مساعدة": "help",
             "اللغة": "language",
             "لغة": "language",
+            "🌐 اللغة": "language",
+            "🌐 لغة": "language",
             "إدارة": "admin_menu",
             "ادارة": "admin_menu",
+            "⚙️ إدارة": "admin_menu",
+            "⚙️ ادارة": "admin_menu",
         }
     }
 
-    button_action = keyboard_button_map.get(lang, {}).get(text_lower)
+    button_action = keyboard_button_map.get(lang, {}).get(text_lower) or keyboard_button_map.get(lang, {}).get(text_input)
 
     if button_action == "track":
         context.user_data["awaiting_track_url"] = True
