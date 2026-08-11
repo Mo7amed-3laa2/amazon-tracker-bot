@@ -7,7 +7,8 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /data
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

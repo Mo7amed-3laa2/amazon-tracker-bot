@@ -162,7 +162,6 @@ def build_help_message(lang: str = "en") -> str:
 def build_menu_markup(lang: str = "en", user_id: int | None = None) -> InlineKeyboardMarkup:
     track_btn = "📦 أضف منتج" if lang == "ar" else "📦 Add Product"
     list_btn = "🧾 منتجاتي" if lang == "ar" else "🧾 My Products"
-    check_btn = "🔎 افحص الآن" if lang == "ar" else "🔎 Check Now"
     remove_btn = "❌ إزالة" if lang == "ar" else "❌ Remove"
     help_btn = "❓ المساعدة" if lang == "ar" else "❓ Help & Info"
     lang_btn = "🌐 اللغة" if lang == "ar" else "🌐 Language"
@@ -173,7 +172,6 @@ def build_menu_markup(lang: str = "en", user_id: int | None = None) -> InlineKey
             InlineKeyboardButton(list_btn, callback_data="list"),
         ],
         [
-            InlineKeyboardButton(check_btn, callback_data="check"),
             InlineKeyboardButton(remove_btn, callback_data="untrack"),
         ],
         [
@@ -419,6 +417,11 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "check":
+        user_is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
+        if not user_is_admin:
+            await query.answer(adm(lang)["admin_only"], show_alert=True)
+            return
+
         from scheduler import check_prices
 
         if lang == "ar":
@@ -916,6 +919,7 @@ ADMIN_STRINGS = {
         "btn_stats": "📊 Stats",
         "btn_authorize": "➕ Authorize User",
         "btn_revoke": "➖ Revoke User",
+        "btn_check": "🔎 Check Prices",
         "back": "◀ Back",
         "back_admin": "◀ Back to Admin",
         "admin_only": "🚫 Admin only",
@@ -947,6 +951,7 @@ ADMIN_STRINGS = {
         "btn_stats": "📊 الإحصائيات",
         "btn_authorize": "➕ تفويض مستخدم",
         "btn_revoke": "➖ إزالة مستخدم",
+        "btn_check": "🔎 افحص الأسعار",
         "back": "◀ رجوع",
         "back_admin": "◀ رجوع للإدارة",
         "admin_only": "🚫 للمشرفين فقط",
@@ -1065,6 +1070,7 @@ async def show_admin_panel(update_or_query, lang: str = "en"):
          InlineKeyboardButton(t["btn_stats"], callback_data="admin_stats")],
         [InlineKeyboardButton(t["btn_authorize"], callback_data="admin_authorize"),
          InlineKeyboardButton(t["btn_revoke"], callback_data="admin_revoke")],
+        [InlineKeyboardButton(t["btn_check"], callback_data="check")],
         [InlineKeyboardButton(t["back"], callback_data="back_to_menu")],
     ]
 
