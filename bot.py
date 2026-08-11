@@ -919,6 +919,7 @@ ADMIN_STRINGS = {
         "panel": "⚙️ *Admin Panel*",
         "btn_users": "👥 Users",
         "btn_stats": "📊 Stats",
+        "btn_view_products": "📦 View User Products",
         "btn_authorize": "➕ Authorize User",
         "btn_revoke": "➖ Revoke User",
         "back": "◀ Back",
@@ -926,6 +927,9 @@ ADMIN_STRINGS = {
         "admin_only": "🚫 Admin only",
         "users_title": "👥 *Authorized Users*",
         "no_users": "No users authorized yet.",
+        "select_user_products": "Select a user to view their products:",
+        "user_products_title": "📦 *Products for {name}*",
+        "user_no_products": "This user has no tracked products yet.",
         "badge_admin": "🔐 Admin",
         "badge_user": "✅ User",
         "name": "Name",
@@ -950,6 +954,7 @@ ADMIN_STRINGS = {
         "panel": "⚙️ *لوحة الإدارة*",
         "btn_users": "👥 المستخدمون",
         "btn_stats": "📊 الإحصائيات",
+        "btn_view_products": "📦 عرض منتجات المستخدم",
         "btn_authorize": "➕ تفويض مستخدم",
         "btn_revoke": "➖ إزالة مستخدم",
         "back": "◀ رجوع",
@@ -957,6 +962,9 @@ ADMIN_STRINGS = {
         "admin_only": "🚫 للمشرفين فقط",
         "users_title": "👥 *المستخدمون المصرح لهم*",
         "no_users": "لا يوجد مستخدمون حتى الآن.",
+        "select_user_products": "اختر مستخدمًا لعرض منتجاته:",
+        "user_products_title": "📦 *منتجات {name}*",
+        "user_no_products": "هذا المستخدم لم يضف أي منتجات حتى الآن.",
         "badge_admin": "🔐 مشرف",
         "badge_user": "✅ مستخدم",
         "name": "الاسم",
@@ -1068,6 +1076,7 @@ async def show_admin_panel(update_or_query, lang: str = "en"):
     keyboard = [
         [InlineKeyboardButton(t["btn_users"], callback_data="admin_users"),
          InlineKeyboardButton(t["btn_stats"], callback_data="admin_stats")],
+        [InlineKeyboardButton(t["btn_view_products"], callback_data="admin_view_products")],
         [InlineKeyboardButton(t["btn_authorize"], callback_data="admin_authorize"),
          InlineKeyboardButton(t["btn_revoke"], callback_data="admin_revoke")],
         [InlineKeyboardButton(t["back"], callback_data="back_to_menu")],
@@ -1134,6 +1143,19 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             t["authorize_prompt"], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(back)
         )
 
+    elif action == "admin_view_products":
+        users = get_authorized_users()
+        if not users:
+            await query.edit_message_text(t["no_users"], reply_markup=InlineKeyboardMarkup(back))
+            return
+
+        keyboard = [
+            [InlineKeyboardButton(f"📦 {name}", callback_data=f"view_products_{uid}")]
+            for uid, name, _, _ in users
+        ]
+        keyboard.append([InlineKeyboardButton(t["back"], callback_data="admin_menu")])
+        await query.edit_message_text(t["select_user_products"], reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif action == "admin_revoke":
         revocable = [(uid, name) for uid, name, is_admin_flag, _ in get_authorized_users() if not is_admin_flag]
         if not revocable:
@@ -1146,6 +1168,32 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
         keyboard.append([InlineKeyboardButton(t["back"], callback_data="admin_menu")])
         await query.edit_message_text(t["select_revoke"], reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif action.startswith("view_products_"):
+        target_id = int(action.split("_")[2])
+        user_name = next(
+            (name for uid, name, _, _ in get_authorized_users() if uid == target_id), "User"
+        )
+        products = get_user_products(target_id)
+        
+        if not products:
+            msg = t["user_no_products"]
+            await query.edit_message_text(
+                f"{t['user_products_title'].format(name=user_name)}\n\n{msg}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(back)
+            )
+        else:
+            full_msg = build_products_list_message(products, lang)
+            # Extract just the products part (skip the title from build_products_list_message)
+            products_content = full_msg.split("\n", 1)[1] if "\n" in full_msg else full_msg
+            display_msg = f"{t['user_products_title'].format(name=user_name)}\n\n{products_content}"
+            await query.edit_message_text(
+                display_msg,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(back)
+            )
 
     elif action.startswith("revoke_"):
         target_id = int(action.split("_")[1])
@@ -1189,7 +1237,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_unauthorized_request, pattern="^(copy_user_id|get_instructions)$"))
     app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_(en|ar)|back_to_menu|admin_menu)$"))
-    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^(admin_|revoke_)"))
+    app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^(admin_|revoke_|view_products_)"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
