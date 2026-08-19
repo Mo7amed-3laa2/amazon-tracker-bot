@@ -16,7 +16,8 @@ from database import (
     init_db, add_product, add_user_product, remove_user_product, get_all_products,
     get_user_products, remove_product, get_product_by_id, get_product_by_url,
     is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
-    get_authorized_users, get_user_language, set_user_language, get_price_history
+    get_authorized_users, get_user_language, set_user_language, get_price_history,
+    update_user_product_preferences
 )
 from scraper import fetch_product
 from scheduler import start_scheduler
@@ -228,7 +229,7 @@ def build_products_list_message(products, lang: str = "en") -> str:
         current_text = "Current"
         added_text = "Added"
 
-    for pid, url, name, last_price, prev_price, image_url, added_at, alert_threshold in products:
+    for pid, url, name, last_price, prev_price, image_url, added_at, merchant_name, is_amazon, alert_threshold, price_min, price_max, require_amazon_merchant in products:
         current_str = f"EGP {last_price:,.2f}" if last_price is not None else "N/A"
 
         price_info = f"💰 {current_text}: `{current_str}`"
@@ -241,9 +242,28 @@ def build_products_list_message(products, lang: str = "en") -> str:
 
         added_date = datetime.fromisoformat(added_at).strftime("%b %d") if added_at else "N/A"
         view_text = "عرض على أمازون" if lang == "ar" else "View on Amazon"
+
+        # Build merchant badge
+        merchant_badge = "✅ Amazon" if is_amazon else f"🛒 {merchant_name or 'Other'}"
+
+        # Build price range info if set
+        price_range_info = ""
+        if price_min is not None or price_max is not None:
+            if lang == "ar":
+                range_text = "النطاق:"
+            else:
+                range_text = "Range:"
+            range_parts = []
+            if price_min is not None:
+                range_parts.append(f"`≥EGP {price_min:,.0f}`")
+            if price_max is not None:
+                range_parts.append(f"`≤EGP {price_max:,.0f}`")
+            price_range_info = f"\n📍 {range_text} {' - '.join(range_parts)}"
+
         lines.append(
             f"*{pid}.* {name}\n"
             f"{price_info}\n"
+            f"🏪 {merchant_badge}{price_range_info}\n"
             f"📅 {added_text}: {added_date}\n"
             f"🔗 [{view_text}]({url})\n"
         )
@@ -555,12 +575,55 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await status.edit_text(msg, parse_mode="Markdown")
         return
 
-    product_id = add_product(url, result["name"], result["price"], result.get("image"))
+    product_id = add_product(
+        url,
+        result["name"],
+        result["price"],
+        result.get("image"),
+        result.get("merchant_name"),
+        result.get("is_amazon", True)
+    )
     add_user_product(user_id, product_id)
 
+    # Store product info for preference setup
+    context.user_data["new_product_id"] = product_id
+    context.user_data["new_product_name"] = result["name"]
+    context.user_data["new_product_price"] = result["price"]
+    context.user_data["new_product_is_amazon"] = result.get("is_amazon", True)
+    context.user_data["new_product_merchant"] = result.get("merchant_name", "Amazon")
+
+    # Build success message with product details and merchant info
+    merchant_badge = "✅ Amazon" if result.get("is_amazon", True) else f"🛒 {result.get('merchant_name', 'Third-party')}"
+    if lang == "ar":
+        success_msg = (
+            f"✅ *تمت الإضافة بنجاح!*\n\n"
+            f"📦 *{result['name'][:50]}*\n"
+            f"💰 السعر: `EGP {result['price']:,.2f}`\n"
+            f"🏪 البائع: {merchant_badge}\n\n"
+            f"_هل تريد تعيين نطاق سعر أو تصفية البائع؟_"
+        )
+    else:
+        success_msg = (
+            f"✅ *Successfully Added!*\n\n"
+            f"📦 *{result['name'][:50]}*\n"
+            f"💰 Price: `EGP {result['price']:,.2f}`\n"
+            f"🏪 Seller: {merchant_badge}\n\n"
+            f"_Set price range or seller preference?_"
+        )
+
+    prefs_btn = "⚙️ تفضيلات" if lang == "ar" else "⚙️ Preferences"
+    skip_btn = "⏭️ تخطي" if lang == "ar" else "⏭️ Skip"
+    keyboard = [
+        [
+            InlineKeyboardButton(prefs_btn, callback_data=f"setup_prefs_{product_id}"),
+            InlineKeyboardButton(skip_btn, callback_data="back_to_menu"),
+        ]
+    ]
+
     await status.edit_text(
-        build_tracking_success_message(result["name"], result["price"], lang),
+        success_msg,
         parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
     context.user_data["awaiting_track_url"] = False
 
@@ -1210,6 +1273,55 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             await show_admin_panel(query, lang)
 
 
+async def handle_preferences_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    lang = get_lang(context, user_id)
+    action = query.data
+
+    if action.startswith("setup_prefs_"):
+        product_id = int(action.split("_")[2])
+        product = get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text("❌ Product not found")
+            return
+
+        merchant_name = product[7] if len(product) > 7 else "Amazon"
+        is_amazon = product[8] if len(product) > 8 else True
+
+        context.user_data["setup_product_id"] = product_id
+        context.user_data["setup_step"] = "price_range"
+
+        if lang == "ar":
+            msg = (
+                f"⚙️ *تفضيلات المنتج*\n\n"
+                f"📦 *{product[2]}*\n\n"
+                f"*1️⃣ نطاق السعر*\n"
+                f"أرسل أقل سعر (اتركها فارغة لتخطيها)\n"
+                f"مثال: `100`"
+            )
+        else:
+            msg = (
+                f"⚙️ *Product Preferences*\n\n"
+                f"📦 *{product[2]}*\n\n"
+                f"*1️⃣ Price Range*\n"
+                f"Send minimum price (leave empty to skip)\n"
+                f"Example: `100`"
+            )
+
+        back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
+        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif action.startswith("skip_prefs_"):
+        product_id = int(action.split("_")[2])
+        await query.edit_message_text("✅ Product added!", reply_markup=build_menu_markup(lang, user_id))
+        context.user_data["setup_product_id"] = None
+        context.user_data["setup_step"] = None
+
+
 async def post_init(application):
     add_authorized_user(ADMIN_ID, "Admin", True)
     start_scheduler(application.bot, CHAT_ID, INTERVAL)
@@ -1238,6 +1350,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_unauthorized_request, pattern="^(copy_user_id|get_instructions)$"))
     app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^(track|list|check|untrack|help|language|lang_(en|ar)|back_to_menu|admin_menu)$"))
     app.add_handler(CallbackQueryHandler(handle_admin_action, pattern="^(admin_|revoke_|view_products_)"))
+    app.add_handler(CallbackQueryHandler(handle_preferences_setup, pattern="^(setup_prefs_|skip_prefs_)"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 

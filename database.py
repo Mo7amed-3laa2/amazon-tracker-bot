@@ -81,6 +81,8 @@ def init_db():
                 last_price REAL,
                 previous_price REAL,
                 image_url TEXT,
+                merchant_name TEXT,
+                is_amazon BOOLEAN DEFAULT 1,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -91,6 +93,9 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 product_id INTEGER NOT NULL,
                 alert_threshold REAL,
+                price_min REAL,
+                price_max REAL,
+                require_amazon_merchant BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
                 UNIQUE(user_id, product_id)
@@ -133,33 +138,77 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            conn.execute("ALTER TABLE products ADD COLUMN merchant_name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE products ADD COLUMN is_amazon BOOLEAN DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE user_products ADD COLUMN price_min REAL")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE user_products ADD COLUMN price_max REAL")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE user_products ADD COLUMN require_amazon_merchant BOOLEAN DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
         logger.info("[database] Database initialized successfully")
 
 
-def add_product(url: str, name: str, price: float, image_url: str | None = None) -> int:
+def add_product(url: str, name: str, price: float, image_url: str | None = None, merchant_name: str | None = None, is_amazon: bool = True) -> int:
     with get_connection() as conn:
         cursor = conn.execute(
-            "INSERT OR IGNORE INTO products (url, name, last_price, previous_price, image_url) VALUES (?, ?, ?, ?, ?)",
-            (url, name, price, price, image_url),
+            "INSERT OR IGNORE INTO products (url, name, last_price, previous_price, image_url, merchant_name, is_amazon) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (url, name, price, price, image_url, merchant_name, is_amazon),
         )
         product_id = cursor.lastrowid or conn.execute(
             "SELECT id FROM products WHERE url = ?", (url,)
         ).fetchone()[0]
 
-        # Reuse this connection — opening a second one here would wait on the
-        # write lock this one already holds and deadlock until it times out.
         _insert_price_history(conn, product_id, price)
         return product_id
 
 
-def add_user_product(user_id: int, product_id: int, alert_threshold: float | None = None):
+def add_user_product(user_id: int, product_id: int, alert_threshold: float | None = None, price_min: float | None = None, price_max: float | None = None, require_amazon_merchant: bool = False):
     with get_connection() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO user_products (user_id, product_id, alert_threshold) VALUES (?, ?, ?)",
-            (user_id, product_id, alert_threshold),
+            "INSERT OR IGNORE INTO user_products (user_id, product_id, alert_threshold, price_min, price_max, require_amazon_merchant) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, product_id, alert_threshold, price_min, price_max, require_amazon_merchant),
         )
         conn.commit()
+
+
+def update_user_product_preferences(user_id: int, product_id: int, price_min: float | None = None, price_max: float | None = None, require_amazon_merchant: bool | None = None):
+    with get_connection() as conn:
+        updates = []
+        params = []
+        if price_min is not None:
+            updates.append("price_min = ?")
+            params.append(price_min)
+        if price_max is not None:
+            updates.append("price_max = ?")
+            params.append(price_max)
+        if require_amazon_merchant is not None:
+            updates.append("require_amazon_merchant = ?")
+            params.append(require_amazon_merchant)
+
+        if updates:
+            params.extend([user_id, product_id])
+            query = f"UPDATE user_products SET {', '.join(updates)} WHERE user_id = ? AND product_id = ?"
+            conn.execute(query, params)
+            conn.commit()
 
 
 def remove_user_product(user_id: int, product_id: int):
@@ -188,7 +237,8 @@ def get_all_products():
 def get_user_products(user_id: int):
     with get_connection() as conn:
         rows = conn.execute("""
-            SELECT p.id, p.url, p.name, p.last_price, p.previous_price, p.image_url, p.added_at, up.alert_threshold
+            SELECT p.id, p.url, p.name, p.last_price, p.previous_price, p.image_url, p.added_at, p.merchant_name, p.is_amazon,
+                   up.alert_threshold, up.price_min, up.price_max, up.require_amazon_merchant
             FROM products p
             JOIN user_products up ON p.id = up.product_id
             WHERE up.user_id = ?
@@ -365,10 +415,10 @@ def get_all_authorized_users_for_notification():
 
 
 def get_user_for_product_notification(product_id: int):
-    """Get all users tracking this product with their language."""
+    """Get all users tracking this product with their language and preferences."""
     with get_connection() as conn:
         rows = conn.execute("""
-            SELECT DISTINCT au.user_id, au.language
+            SELECT au.user_id, au.language, up.price_min, up.price_max, up.require_amazon_merchant
             FROM authorized_users au
             JOIN user_products up ON au.user_id = up.user_id
             WHERE up.product_id = ? AND au.status = 'active'

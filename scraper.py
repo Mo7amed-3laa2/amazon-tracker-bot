@@ -223,6 +223,7 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
         image_url = _extract_image(soup)
         description = _extract_description(soup, lang)
         specs = _extract_specs(soup, lang)
+        merchant_name, is_amazon = _extract_merchant(soup)
 
         if price is None:
             has_title = soup.find(id="productTitle") is not None
@@ -233,13 +234,15 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
             )
             return None
 
-        logger.info(f"[scraper] OK '{name[:40]}' -> {price:,.2f}")
+        logger.info(f"[scraper] OK '{name[:40]}' -> {price:,.2f} (merchant={merchant_name or 'Unknown'}, is_amazon={is_amazon})")
         return {
             "name": name,
             "price": price,
             "image": image_url,
             "description": description,
             "specs": specs,
+            "merchant_name": merchant_name,
+            "is_amazon": is_amazon,
             "language": lang,
         }
     except Exception as e:
@@ -304,6 +307,58 @@ def _extract_specs(soup: BeautifulSoup, lang: str = "en") -> dict | None:
                 specs[key] = value
 
     return specs if specs else None
+
+
+def _extract_merchant(soup: BeautifulSoup) -> tuple[str | None, bool]:
+    """Extract merchant info and determine if sold by Amazon.
+
+    Returns tuple of (merchant_name, is_amazon)
+    """
+    # Look for "Sold by" information in the product details
+    sold_by_selectors = [
+        "div#bylineInfo",
+        "div#merchantInfoFeature",
+        "div.a-section.a-spacing-small.a-spacing-top-small",
+    ]
+
+    merchant_text = None
+    for selector in sold_by_selectors:
+        el = soup.select_one(selector)
+        if el:
+            text = el.get_text(strip=True)
+            if "Sold" in text or "sold" in text:
+                merchant_text = text
+                break
+
+    # Check the buy box for merchant info
+    if not merchant_text:
+        buybox = soup.find("div", {"id": "dp-container"}) or soup.find("div", {"id": "corePriceDisplay_desktop_feature_div"})
+        if buybox:
+            merchant_text = buybox.get_text()
+
+    # Parse merchant name
+    merchant_name = None
+    is_amazon = True
+
+    if merchant_text:
+        # Check if Amazon
+        if "amazon" in merchant_text.lower() or "amazon.eg" in merchant_text.lower():
+            is_amazon = True
+            merchant_name = "Amazon"
+        else:
+            is_amazon = False
+            # Extract third-party merchant name if available
+            parts = merchant_text.split()
+            if len(parts) > 0:
+                # Try to extract merchant name (usually after "Sold by")
+                if "by" in merchant_text.lower():
+                    idx = next((i for i, p in enumerate(parts) if p.lower() == "by"), None)
+                    if idx and idx + 1 < len(parts):
+                        merchant_name = " ".join(parts[idx + 1:idx + 3])
+                if not merchant_name:
+                    merchant_name = merchant_text[:50]
+
+    return merchant_name, is_amazon
 
 
 # Ordered most-specific first: the buy-box / core price blocks come before the
