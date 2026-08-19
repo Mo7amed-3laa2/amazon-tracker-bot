@@ -445,8 +445,8 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             msg, product_keyboard = build_products_list_message(products, lang, show_buttons=True)
-            product_keyboard.inline_keyboard.append([InlineKeyboardButton(back_btn, callback_data="back_to_menu")])
-            await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=product_keyboard)
+            rows = list(product_keyboard.inline_keyboard) + [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+            await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(rows))
 
     elif action == "check":
         user_is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
@@ -744,7 +744,8 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg, product_keyboard = build_products_list_message(products, lang, show_buttons=True)
-    product_keyboard.inline_keyboard.append([InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")])
+    rows = list(product_keyboard.inline_keyboard) + [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
+    product_keyboard = InlineKeyboardMarkup(rows)
     await update.message.reply_text(
         msg,
         parse_mode="Markdown",
@@ -942,7 +943,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
             return
         msg, product_keyboard = build_products_list_message(products, lang, show_buttons=True)
-        product_keyboard.inline_keyboard.append([InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")])
+        rows = list(product_keyboard.inline_keyboard) + [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
+        product_keyboard = InlineKeyboardMarkup(rows)
         await update.message.reply_text(
             msg,
             parse_mode="Markdown",
