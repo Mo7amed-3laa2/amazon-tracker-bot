@@ -8,6 +8,19 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "tracker.db"))
 
 
+def _cleanup_wal_files():
+    """Remove corrupted WAL files that prevent database access."""
+    wal_path = f"{DB_PATH}-wal"
+    shm_path = f"{DB_PATH}-shm"
+    for path in [wal_path, shm_path]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                logger.warning(f"[database] Removed corrupted WAL file: {path}")
+            except Exception as e:
+                logger.error(f"[database] Failed to remove {path}: {e}")
+
+
 @contextmanager
 def get_connection():
     """Yield a connection that is committed on success and always closed.
@@ -17,8 +30,23 @@ def get_connection():
     fast in a long-running bot. timeout=30 sets busy_timeout so the bot and the
     scheduler wait for each other instead of raising "database is locked".
     """
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.OperationalError as e:
+        if "unable to open database file" in str(e):
+            logger.error(f"[database] Failed to open database: {e}. Attempting recovery...")
+            _cleanup_wal_files()
+            try:
+                conn = sqlite3.connect(DB_PATH, timeout=30)
+                conn.row_factory = sqlite3.Row
+                logger.info("[database] Database recovered after WAL cleanup")
+            except sqlite3.OperationalError as recovery_err:
+                logger.critical(f"[database] Recovery failed: {recovery_err}")
+                raise
+        else:
+            raise
+
     try:
         yield conn
         conn.commit()
@@ -30,6 +58,15 @@ def get_connection():
 
 
 def init_db():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"[database] Created database directory: {db_dir}")
+        except Exception as e:
+            logger.error(f"[database] Failed to create database directory: {e}")
+            raise
+
     with get_connection() as conn:
         # WAL lets the scheduler read while the bot writes instead of the two
         # blocking each other. It is a persistent property of the file, so this
