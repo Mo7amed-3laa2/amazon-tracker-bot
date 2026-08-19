@@ -212,11 +212,13 @@ def build_tracking_success_message(product_name: str, price: float, lang: str = 
     )
 
 
-def build_products_list_message(products, lang: str = "en", show_buttons: bool = False) -> tuple | str:
-    """Build products list message.
+def build_products_list_message(products, lang: str = "en", bot_username: str | None = None) -> str:
+    """Build the products list message with per-item 'View on Amazon' and 'Edit' text links.
 
-    If show_buttons=True, returns (message, keyboard) for inline buttons.
-    Otherwise returns just the message string.
+    The edit link is a Telegram deep link (t.me/<bot>?start=edit_<id>) that
+    re-opens /start with a hidden argument — clicking it does the same thing
+    as the edit_product_<id> callback button, without needing a button row
+    per item.
     """
     if not products:
         if lang == "ar":
@@ -226,11 +228,14 @@ def build_products_list_message(products, lang: str = "en", show_buttons: bool =
     if lang == "ar":
         lines = [f"📦 *المنتجات المتتبعة* ({len(products)})\n"]
         alert_text = "تنبيه"
+        view_text = "أمازون"
+        edit_text = "تعديل"
     else:
         lines = [f"📦 *Tracked Products* ({len(products)})\n"]
         alert_text = "Alert"
+        view_text = "Amazon"
+        edit_text = "Edit"
 
-    keyboard = []
     for pid, url, name, last_price, prev_price, image_url, added_at, merchant_name, is_amazon, alert_threshold, price_min, price_max, require_amazon_merchant in products:
         current_str = f"EGP {last_price:,.2f}" if last_price is not None else "N/A"
 
@@ -249,21 +254,18 @@ def build_products_list_message(products, lang: str = "en", show_buttons: bool =
             alert_info = f" · 🚨 {alert_text} `≤EGP {price_max:,.0f}`"
 
         short_name = name[:45] + ("…" if len(name) > 45 else "")
+
+        links = f"🔗 [{view_text}]({url})"
+        if bot_username:
+            links += f" · [✏️ {edit_text}](https://t.me/{bot_username}?start=edit_{pid})"
+
         lines.append(
             f"*{pid}.* {short_name}\n"
             f"💰 `{current_str}`{change_info}{merchant_info}{alert_info}\n"
+            f"{links}\n"
         )
 
-        if show_buttons:
-            label_name = name[:20] + ("…" if len(name) > 20 else "")
-            edit_btn = f"✏️ {pid}. {label_name}"
-            keyboard.append([InlineKeyboardButton(edit_btn, callback_data=f"edit_product_{pid}")])
-
-    message = "\n".join(lines)
-
-    if show_buttons:
-        return message, InlineKeyboardMarkup(keyboard)
-    return message
+    return "\n".join(lines)
 
 
 def is_valid_amazon_url(url: str) -> bool:
@@ -350,6 +352,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_untrack_id"] = False
     lang = context.user_data["language"]
 
+    # Deep link from a "✏️ Edit" text link in the product list: t.me/<bot>?start=edit_<id>
+    if context.args and context.args[0].startswith("edit_"):
+        try:
+            product_id = int(context.args[0].split("_", 1)[1])
+        except ValueError:
+            product_id = None
+        if product_id is not None:
+            await send_product_edit_screen(update, context, user_id, product_id, lang)
+            return
+
     await update.message.reply_text(
         build_help_message(lang),
         parse_mode="Markdown",
@@ -432,9 +444,9 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
             await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            msg, product_keyboard = build_products_list_message(products, lang, show_buttons=True)
-            rows = list(product_keyboard.inline_keyboard) + [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
-            await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(rows))
+            msg = build_products_list_message(products, lang, bot_username=context.bot.username)
+            keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
+            await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "check":
         user_is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
@@ -731,14 +743,13 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
-    msg, product_keyboard = build_products_list_message(products, lang, show_buttons=True)
-    rows = list(product_keyboard.inline_keyboard) + [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
-    product_keyboard = InlineKeyboardMarkup(rows)
+    msg = build_products_list_message(products, lang, bot_username=context.bot.username)
+    keyboard = [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
     await update.message.reply_text(
         msg,
         parse_mode="Markdown",
         disable_web_page_preview=True,
-        reply_markup=product_keyboard,
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -930,14 +941,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 msg = "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\nUse 📦 to add your first product!"
             await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
             return
-        msg, product_keyboard = build_products_list_message(products, lang, show_buttons=True)
-        rows = list(product_keyboard.inline_keyboard) + [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
-        product_keyboard = InlineKeyboardMarkup(rows)
+        msg = build_products_list_message(products, lang, bot_username=context.bot.username)
+        keyboard = [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
         await update.message.reply_text(
             msg,
             parse_mode="Markdown",
             disable_web_page_preview=True,
-            reply_markup=product_keyboard
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -1378,6 +1388,25 @@ async def show_product_edit_screen(query, context, user_id: int, product_id: int
 
     msg, keyboard = build_product_edit_screen(product, user_product, lang)
     await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    return True
+
+
+async def send_product_edit_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, product_id: int, lang: str) -> bool:
+    """Same as show_product_edit_screen but sends a new message instead of editing one.
+
+    Used by the "✏️ Edit" deep link in the product list, which arrives as a
+    fresh /start command rather than a callback query.
+    """
+    product = get_product_by_id(product_id)
+    user_product = next((p for p in get_user_products(user_id) if p[0] == product_id), None)
+
+    if product is None or user_product is None:
+        not_found = "❌ المنتج غير موجود أو غير متتبع" if lang == "ar" else "❌ Product not found or not tracked by you"
+        await update.message.reply_text(not_found, reply_markup=build_menu_markup(lang, user_id))
+        return False
+
+    msg, keyboard = build_product_edit_screen(product, user_product, lang)
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
     return True
 
 
