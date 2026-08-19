@@ -309,56 +309,53 @@ def _extract_specs(soup: BeautifulSoup, lang: str = "en") -> dict | None:
     return specs if specs else None
 
 
+_AMAZON_SELLER_NAMES = ("amazon", "amazon.eg", "amazon.com")
+
+
 def _extract_merchant(soup: BeautifulSoup) -> tuple[str | None, bool]:
     """Extract merchant info and determine if sold by Amazon.
 
-    Returns tuple of (merchant_name, is_amazon)
+    Only trusts elements that specifically carry the seller name — never a
+    whole-page or whole-buybox text blob, which almost always contains the
+    word "Amazon" somewhere (badges, disclaimers, footer links) regardless of
+    who the actual seller is, and would otherwise mark every product as
+    Amazon-sold.
+
+    Returns tuple of (merchant_name, is_amazon). is_amazon defaults to True
+    when no seller line is found at all, matching Amazon's own convention of
+    omitting "Sold by" for its first-party listings.
     """
-    # Look for "Sold by" information in the product details
-    sold_by_selectors = [
-        "div#bylineInfo",
-        "div#merchantInfoFeature",
-        "div.a-section.a-spacing-small.a-spacing-top-small",
-    ]
+    # The seller name link in the buy box, e.g. <a id="sellerProfileTriggerId">ABC Trading</a>
+    seller_link = soup.find(id="sellerProfileTriggerId")
+    if seller_link:
+        name = seller_link.get_text(strip=True)
+        if name:
+            is_amazon = name.lower() in _AMAZON_SELLER_NAMES
+            return (None if is_amazon else name), is_amazon
 
-    merchant_text = None
-    for selector in sold_by_selectors:
-        el = soup.select_one(selector)
-        if el:
-            text = el.get_text(strip=True)
-            if "Sold" in text or "sold" in text:
-                merchant_text = text
-                break
+    # "Ships from and sold by ..." / "Sold by ... and Fulfilled by Amazon"
+    merchant_info = soup.find(id="merchant-info")
+    if merchant_info:
+        text = merchant_info.get_text(" ", strip=True)
+        match = re.search(r"sold by\s+([^.,]+?)(?:\s+and\s+(?:ships|fulfilled)|[.,]|$)", text, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            is_amazon = name.lower() in _AMAZON_SELLER_NAMES
+            return (None if is_amazon else name), is_amazon
 
-    # Check the buy box for merchant info
-    if not merchant_text:
-        buybox = soup.find("div", {"id": "dp-container"}) or soup.find("div", {"id": "corePriceDisplay_desktop_feature_div"})
-        if buybox:
-            merchant_text = buybox.get_text()
+    # Newer tabular buy box: a row labelled "Sold by" with the seller in the next cell
+    for row in soup.select("#tabular-buybox tr, table.a-keyvalue tr"):
+        label = row.find(["th", "td"])
+        if label and "sold by" in label.get_text(strip=True).lower():
+            cells = row.find_all("td")
+            if cells:
+                name = cells[-1].get_text(strip=True)
+                if name:
+                    is_amazon = name.lower() in _AMAZON_SELLER_NAMES
+                    return (None if is_amazon else name), is_amazon
 
-    # Parse merchant name
-    merchant_name = None
-    is_amazon = True
-
-    if merchant_text:
-        # Check if Amazon
-        if "amazon" in merchant_text.lower() or "amazon.eg" in merchant_text.lower():
-            is_amazon = True
-            merchant_name = "Amazon"
-        else:
-            is_amazon = False
-            # Extract third-party merchant name if available
-            parts = merchant_text.split()
-            if len(parts) > 0:
-                # Try to extract merchant name (usually after "Sold by")
-                if "by" in merchant_text.lower():
-                    idx = next((i for i, p in enumerate(parts) if p.lower() == "by"), None)
-                    if idx and idx + 1 < len(parts):
-                        merchant_name = " ".join(parts[idx + 1:idx + 3])
-                if not merchant_name:
-                    merchant_name = merchant_text[:50]
-
-    return merchant_name, is_amazon
+    # No seller line found at all — Amazon's own listings commonly omit it.
+    return None, True
 
 
 # Ordered most-specific first: the buy-box / core price blocks come before the

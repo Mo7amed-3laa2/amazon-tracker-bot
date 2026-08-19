@@ -225,50 +225,38 @@ def build_products_list_message(products, lang: str = "en", show_buttons: bool =
 
     if lang == "ar":
         lines = [f"📦 *المنتجات المتتبعة* ({len(products)})\n"]
-        before_text = "السعر السابق"
-        current_text = "السعر الحالي"
-        added_text = "تاريخ الإضافة"
-        alert_text = "سعر التنبيه"
+        alert_text = "تنبيه"
     else:
         lines = [f"📦 *Tracked Products* ({len(products)})\n"]
-        before_text = "Before"
-        current_text = "Current"
-        added_text = "Added"
-        alert_text = "Alert Price"
+        alert_text = "Alert"
 
     keyboard = []
     for pid, url, name, last_price, prev_price, image_url, added_at, merchant_name, is_amazon, alert_threshold, price_min, price_max, require_amazon_merchant in products:
         current_str = f"EGP {last_price:,.2f}" if last_price is not None else "N/A"
 
-        price_info = f"💰 {current_text}: `{current_str}`"
+        change_info = ""
         if prev_price is not None and prev_price != last_price and last_price is not None:
-            prev_str = f"EGP {prev_price:,.2f}"
             diff = last_price - prev_price
             pct = (diff / prev_price) * 100 if prev_price > 0 else 0
             emoji = "📉" if diff < 0 else "📈"
-            price_info += f"\n{emoji} {before_text}: ~~`{prev_str}`~~ (±{abs(pct):.1f}%)"
+            change_info = f" ({emoji}{abs(pct):.0f}%)"
 
-        added_date = datetime.fromisoformat(added_at).strftime("%b %d") if added_at else "N/A"
-        view_text = "عرض على أمازون" if lang == "ar" else "View on Amazon"
+        # Only call out the seller when it's NOT Amazon — Amazon is the assumed default.
+        merchant_info = "" if is_amazon else f" · 🛒 {merchant_name or 'Other seller'}"
 
-        # Build merchant badge
-        merchant_badge = "✅ Amazon" if is_amazon else f"🛒 {merchant_name or 'Other'}"
-
-        # Build alert price info if set
         alert_info = ""
         if price_max is not None:
-            alert_info = f"\n🚨 {alert_text}: `≤EGP {price_max:,.0f}`"
+            alert_info = f" · 🚨 {alert_text} `≤EGP {price_max:,.0f}`"
 
+        short_name = name[:45] + ("…" if len(name) > 45 else "")
         lines.append(
-            f"*{pid}.* {name}\n"
-            f"{price_info}\n"
-            f"🏪 {merchant_badge}{alert_info}\n"
-            f"📅 {added_text}: {added_date}\n"
-            f"🔗 [{view_text}]({url})\n"
+            f"*{pid}.* {short_name}\n"
+            f"💰 `{current_str}`{change_info}{merchant_info}{alert_info}\n"
         )
 
         if show_buttons:
-            edit_btn = "✏️ تعديل" if lang == "ar" else "✏️ Edit"
+            label_name = name[:20] + ("…" if len(name) > 20 else "")
+            edit_btn = f"✏️ {pid}. {label_name}"
             keyboard.append([InlineKeyboardButton(edit_btn, callback_data=f"edit_product_{pid}")])
 
     message = "\n".join(lines)
