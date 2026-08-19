@@ -211,6 +211,15 @@ def update_user_product_preferences(user_id: int, product_id: int, price_min: fl
             conn.commit()
 
 
+def clear_user_product_alert(user_id: int, product_id: int):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE user_products SET price_min = NULL, price_max = NULL WHERE user_id = ? AND product_id = ?",
+            (user_id, product_id),
+        )
+        conn.commit()
+
+
 def remove_user_product(user_id: int, product_id: int):
     with get_connection() as conn:
         conn.execute("DELETE FROM user_products WHERE user_id = ? AND product_id = ?", (user_id, product_id))
@@ -300,7 +309,7 @@ def remove_product(product_id: int):
 def get_product_by_id(product_id: int):
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, url, name, last_price, previous_price, image_url, added_at FROM products WHERE id = ?",
+            "SELECT id, url, name, last_price, previous_price, image_url, added_at, merchant_name, is_amazon FROM products WHERE id = ?",
             (product_id,),
         ).fetchone()
     return tuple(row) if row else None

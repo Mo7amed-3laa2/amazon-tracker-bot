@@ -11,7 +11,7 @@ from scraper import fetch_product
 logger = logging.getLogger(__name__)
 
 
-def get_localized_notification(product_name: str, last_price: float, new_price: float, url: str, lang: str) -> str:
+def get_localized_notification(product_name: str, last_price: float, new_price: float, url: str, lang: str, alert_price: float | None = None) -> str:
     """Generate price notification in user's language."""
     if last_price is None or last_price == 0:
         if lang == "ar":
@@ -62,7 +62,9 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
             view_text = "View on Amazon"
 
     if lang == "ar":
+        banner = f"🚨 *وصل إلى سعرك المستهدف `EGP {alert_price:,.2f}`!*\n\n" if alert_price is not None else ""
         return (
+            f"{banner}"
             f"{emoji} *السعر {direction}!*\n\n"
             f"📦 *{product_name}*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -72,7 +74,9 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
             f"🔗 [{view_text}]({url})"
         )
     else:
+        banner = f"🚨 *Hit your target price of `EGP {alert_price:,.2f}`!*\n\n" if alert_price is not None else ""
         return (
+            f"{banner}"
             f"{emoji} *Price {direction}!*\n\n"
             f"📦 *{product_name}*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -83,28 +87,16 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
         )
 
 
-def _should_notify_user(user_prefs: dict, new_price: float, is_amazon: bool) -> bool:
-    """Check if user should be notified based on preferences.
+def _should_notify_user(alert_price: float | None, require_amazon: bool, new_price: float, is_amazon: bool) -> bool:
+    """Decide whether this user wants an alert for the new price.
 
-    Args:
-        user_prefs: dict with keys: price_min, price_max, require_amazon_merchant
-        new_price: current price to check
-        is_amazon: whether product is sold by Amazon
-
-    Returns True if notification should be sent.
+    alert_price is a ceiling: with one set, only prices at or below it notify.
+    With none set, every price change notifies (the original behaviour).
     """
-    # Check merchant filter
-    if user_prefs.get("require_amazon_merchant") and not is_amazon:
+    if require_amazon and not is_amazon:
         return False
 
-    # Check price range
-    price_min = user_prefs.get("price_min")
-    price_max = user_prefs.get("price_max")
-
-    if price_min is not None and new_price < price_min:
-        return False
-
-    if price_max is not None and new_price > price_max:
+    if alert_price is not None and new_price > alert_price:
         return False
 
     return True
@@ -150,23 +142,17 @@ async def check_prices(bot: Bot, chat_id: str):
                 continue
 
             sent_count = 0
-            for user_id, user_lang, price_min, price_max, require_amazon in users:
-                user_prefs = {
-                    "price_min": price_min,
-                    "price_max": price_max,
-                    "require_amazon_merchant": require_amazon,
-                }
-
-                if not _should_notify_user(user_prefs, new_price, is_amazon):
+            for user_id, user_lang, price_min, alert_price, require_amazon in users:
+                if not _should_notify_user(alert_price, require_amazon, new_price, is_amazon):
                     logger.debug(
                         f"[scheduler] Skipping notification for user {user_id}: "
-                        f"price={new_price} (min={price_min}, max={price_max}), "
+                        f"price={new_price}, alert={alert_price}, "
                         f"is_amazon={is_amazon}, require_amazon={require_amazon}"
                     )
                     continue
 
                 try:
-                    message = get_localized_notification(product_name, last_price, new_price, url, user_lang)
+                    message = get_localized_notification(product_name, last_price, new_price, url, user_lang, alert_price)
                     await bot.send_message(
                         chat_id=user_id,
                         text=message,
