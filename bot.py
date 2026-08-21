@@ -1482,6 +1482,24 @@ async def post_init(application):
     start_scheduler(application.bot, CHAT_ID, INTERVAL)
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Catch anything a handler raises so one failure (e.g. the DB being
+    briefly unreachable) logs cleanly and tells the user to retry, instead of
+    the framework's default bare traceback dump with no user feedback."""
+    logger.error("Unhandled exception while processing an update", exc_info=context.error)
+
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            lang = get_user_language(update.effective_user.id) if update.effective_user else "en"
+        except Exception:
+            lang = "en"
+        text = "⚠️ حدث خطأ مؤقت، من فضلك حاول مرة أخرى." if lang == "ar" else "⚠️ Something went wrong, please try again in a moment."
+        try:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+        except Exception:
+            pass
+
+
 def main():
     validate_config()
     init_db()
@@ -1492,6 +1510,8 @@ def main():
         .post_init(post_init)
         .build()
     )
+
+    app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("track", track))

@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import shutil
 import logging
 from contextlib import contextmanager
 
@@ -21,6 +22,33 @@ def _cleanup_wal_files():
                 logger.error(f"[database] Failed to remove {path}: {e}")
 
 
+def _log_diagnostics():
+    """Log why the database directory might be unreachable — a vanished mount,
+    permissions, or a full disk all raise the same generic OperationalError,
+    so we have to inspect the filesystem ourselves to tell them apart."""
+    db_dir = os.path.dirname(DB_PATH) or "."
+    try:
+        dir_exists = os.path.isdir(db_dir)
+        logger.error(f"[database] diagnostics: dir={db_dir} exists={dir_exists}")
+        if dir_exists:
+            logger.error(f"[database] diagnostics: dir writable={os.access(db_dir, os.W_OK)}")
+            usage = shutil.disk_usage(db_dir)
+            logger.error(
+                f"[database] diagnostics: disk free={usage.free / 1024 / 1024:.1f}MB "
+                f"of {usage.total / 1024 / 1024:.1f}MB"
+            )
+            logger.error(f"[database] diagnostics: db file exists={os.path.exists(DB_PATH)}")
+    except Exception as diag_err:
+        logger.error(f"[database] diagnostics failed: {diag_err}")
+
+
+def _ensure_db_dir():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.isdir(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+        logger.warning(f"[database] Recreated missing database directory: {db_dir}")
+
+
 @contextmanager
 def get_connection():
     """Yield a connection that is committed on success and always closed.
@@ -36,11 +64,13 @@ def get_connection():
     except sqlite3.OperationalError as e:
         if "unable to open database file" in str(e):
             logger.error(f"[database] Failed to open database: {e}. Attempting recovery...")
+            _log_diagnostics()
             _cleanup_wal_files()
             try:
+                _ensure_db_dir()
                 conn = sqlite3.connect(DB_PATH, timeout=30)
                 conn.row_factory = sqlite3.Row
-                logger.info("[database] Database recovered after WAL cleanup")
+                logger.info("[database] Database recovered")
             except sqlite3.OperationalError as recovery_err:
                 logger.critical(f"[database] Recovery failed: {recovery_err}")
                 raise
