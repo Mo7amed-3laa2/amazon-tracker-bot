@@ -4,6 +4,11 @@ import shutil
 import logging
 from contextlib import contextmanager
 
+try:
+    import resource  # Unix-only; unavailable on Windows dev machines.
+except ImportError:
+    resource = None
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "tracker.db"))
@@ -38,6 +43,16 @@ def _log_diagnostics():
                 f"of {usage.total / 1024 / 1024:.1f}MB"
             )
             logger.error(f"[database] diagnostics: db file exists={os.path.exists(DB_PATH)}")
+        if resource is not None:
+            try:
+                open_fds = len(os.listdir("/proc/self/fd"))
+                soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+                logger.error(
+                    f"[database] diagnostics: open fds={open_fds} "
+                    f"(soft limit={soft_limit}, hard limit={hard_limit})"
+                )
+            except Exception as fd_err:
+                logger.error(f"[database] fd diagnostics failed: {fd_err}")
     except Exception as diag_err:
         logger.error(f"[database] diagnostics failed: {diag_err}")
 

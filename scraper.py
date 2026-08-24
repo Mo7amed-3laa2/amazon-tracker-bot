@@ -154,7 +154,8 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
     # so no share-tracking parameters are ever sent.
     target = url
     if not _extract_asin(target):
-        target = _resolve_short_link(_new_session(0), target)
+        with _new_session(0) as resolver_session:
+            target = _resolve_short_link(resolver_session, target)
     canonical = _canonical_url(target)
     if canonical:
         if canonical != target:
@@ -165,48 +166,51 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
 
     html = None
     for attempt in range(MAX_ATTEMPTS):
-        session = _new_session(attempt)
-        origin = _origin(target)
-        _warm_up(session, origin)
+        # Each session opens its own connection pool (sockets = file descriptors);
+        # without closing it, a long-running process leaks fds on every attempt
+        # until it can't open any file at all — including the sqlite database.
+        with _new_session(attempt) as session:
+            origin = _origin(target)
+            _warm_up(session, origin)
 
-        try:
-            response = session.get(target, headers=_headers_for(origin), timeout=30)
-            response.raise_for_status()
-        except Exception as e:
-            logger.warning(f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} request failed: {e}")
-            html = None
-            if attempt + 1 < MAX_ATTEMPTS:
-                time.sleep(2 ** attempt)
-            continue
+            try:
+                response = session.get(target, headers=_headers_for(origin), timeout=30)
+                response.raise_for_status()
+            except Exception as e:
+                logger.warning(f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} request failed: {e}")
+                html = None
+                if attempt + 1 < MAX_ATTEMPTS:
+                    time.sleep(2 ** attempt)
+                continue
 
-        body = response.text
-        logger.info(
-            f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} GET {response.status_code} | "
-            f"encoding={response.headers.get('Content-Encoding') or 'none'} | "
-            f"bytes={len(body)} | final_url={response.url}"
-        )
-
-        if _is_blocked(body):
-            logger.warning(
-                f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} hit a bot check "
-                f"({len(body)} bytes) — rotating browser fingerprint"
+            body = response.text
+            logger.info(
+                f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} GET {response.status_code} | "
+                f"encoding={response.headers.get('Content-Encoding') or 'none'} | "
+                f"bytes={len(body)} | final_url={response.url}"
             )
-            html = None
-            if attempt + 1 < MAX_ATTEMPTS:
-                time.sleep(3 * (attempt + 1))
-            continue
 
-        if not _looks_like_html(body):
-            logger.error(
-                f"[scraper] Response body is not readable HTML "
-                f"(encoding={response.headers.get('Content-Encoding')}). "
-                f"First 80 chars: {body[:80]!r}"
-            )
-            html = None
-            continue
+            if _is_blocked(body):
+                logger.warning(
+                    f"[scraper] Attempt {attempt + 1}/{MAX_ATTEMPTS} hit a bot check "
+                    f"({len(body)} bytes) — rotating browser fingerprint"
+                )
+                html = None
+                if attempt + 1 < MAX_ATTEMPTS:
+                    time.sleep(3 * (attempt + 1))
+                continue
 
-        html = body
-        break
+            if not _looks_like_html(body):
+                logger.error(
+                    f"[scraper] Response body is not readable HTML "
+                    f"(encoding={response.headers.get('Content-Encoding')}). "
+                    f"First 80 chars: {body[:80]!r}"
+                )
+                html = None
+                continue
+
+            html = body
+            break
 
     if html is None:
         logger.error(
