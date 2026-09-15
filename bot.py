@@ -17,18 +17,24 @@ from database import (
     get_user_products, remove_product, get_product_by_id, get_product_by_url,
     is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
     get_authorized_users, get_user_language, set_user_language, get_price_history,
-    update_user_product_preferences, clear_user_product_alert
+    update_user_product_preferences, clear_user_product_alert,
+    get_check_interval, set_check_interval
 )
 from formatting import esc, link
 from scraper import canonical_product_url, fetch_product
-from scheduler import start_scheduler
+from scheduler import (
+    start_scheduler, reschedule_check,
+    MIN_CHECK_INTERVAL_MINUTES, MAX_CHECK_INTERVAL_MINUTES,
+)
 
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ADMIN_ID = int(CHAT_ID) if CHAT_ID else None
-INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
+# Starting point only: once an admin picks an interval from the panel, the
+# stored setting wins (see database.get_check_interval).
+DEFAULT_INTERVAL = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
 
 TRANSLATIONS = {
     "en": {
@@ -812,6 +818,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     t = adm(lang)
     back = [[InlineKeyboardButton(t["back_admin"], callback_data="admin_menu")]]
 
+    if context.user_data.get("awaiting_scan_interval"):
+        await process_scan_interval(update, context, update.message.text or "")
+        return
+
     if context.user_data.get("awaiting_authorize_name"):
         username = update.message.text.strip()
         context.user_data["authorize_username"] = username
@@ -1067,6 +1077,7 @@ ADMIN_STRINGS = {
         "btn_users": "👥 Users",
         "btn_stats": "📊 Stats",
         "btn_view_products": "📦 View User Products",
+        "btn_interval": "⏱️ Scan Interval",
         "btn_authorize": "➕ Authorize User",
         "btn_revoke": "➖ Revoke User",
         "back": "◀ Back",
@@ -1096,12 +1107,22 @@ ADMIN_STRINGS = {
         "step2": "📝 *Step 2*\n\nEnter {name}'s Telegram ID:",
         "authorized": "✅ *{name}* authorized! ({uid})",
         "invalid_id": "❌ Invalid ID. Please enter numbers only.",
+        "interval_title": "⏱️ *Scan Interval*",
+        "interval_current": "Scanning every {value} — and alerting on what changed.",
+        "interval_note": "_Takes effect immediately, no restart needed._",
+        "interval_custom_btn": "✏️ Custom…",
+        "interval_prompt": "✏️ *Custom scan interval*\n\nSend the number of minutes ({min}–{max}).",
+        "interval_saved": "✅ Now scanning every {value}.",
+        "interval_saved_restart": "✅ Saved: every {value}.\n\n_It will apply when the bot next starts._",
+        "interval_invalid": "❌ Send a whole number of minutes, e.g. `45`.",
+        "interval_out_of_range": "❌ Pick between {min} and {max} minutes.",
     },
     "ar": {
         "panel": "⚙️ *لوحة الإدارة*",
         "btn_users": "👥 المستخدمون",
         "btn_stats": "📊 الإحصائيات",
         "btn_view_products": "📦 عرض منتجات المستخدم",
+        "btn_interval": "⏱️ فترة الفحص",
         "btn_authorize": "➕ تفويض مستخدم",
         "btn_revoke": "➖ إزالة مستخدم",
         "back": "◀ رجوع",
@@ -1131,6 +1152,15 @@ ADMIN_STRINGS = {
         "step2": "📝 *خطوة 2*\n\nأدخل معرف {name}:",
         "authorized": "✅ تم تفويض *{name}*! ({uid})",
         "invalid_id": "❌ معرف غير صالح. أرقام فقط.",
+        "interval_title": "⏱️ *فترة الفحص*",
+        "interval_current": "يتم الفحص كل {value}، والتنبيه عند أي تغيير.",
+        "interval_note": "_يُطبَّق فورًا بدون إعادة تشغيل._",
+        "interval_custom_btn": "✏️ قيمة مخصصة…",
+        "interval_prompt": "✏️ *فترة فحص مخصصة*\n\nأرسل عدد الدقائق ({min}–{max}).",
+        "interval_saved": "✅ سيتم الفحص كل {value}.",
+        "interval_saved_restart": "✅ تم الحفظ: كل {value}.\n\n_سيُطبَّق عند إعادة تشغيل البوت._",
+        "interval_invalid": "❌ أرسل عدد الدقائق كرقم صحيح، مثل `45`.",
+        "interval_out_of_range": "❌ اختر بين {min} و {max} دقيقة.",
     },
 }
 
@@ -1153,16 +1183,108 @@ def build_users_message(users, lang: str) -> str:
     return "\n".join(lines)
 
 
-def build_stats_message(users, products, lang: str) -> str:
+def build_stats_message(users, products, lang: str, interval_minutes: int) -> str:
     """Render bot statistics in the admin's language."""
     t = adm(lang)
     return (
         f"{t['stats_title']}\n\n"
         f"{t['stats_users']}: {len(users)}\n"
         f"{t['stats_products']}: {len(products)}\n"
-        f"{t['stats_interval']}: {INTERVAL} {t['minutes']}\n"
+        f"{t['stats_interval']}: {format_interval(interval_minutes, lang)}\n"
         f"{t['stats_db']}: {t['stats_db_ok']}\n"
         f"{t['stats_sched']}: {t['stats_sched_ok']}"
+    )
+
+
+INTERVAL_PRESETS = (15, 30, 60, 180, 360, 720)
+
+
+def format_interval(minutes: int, lang: str) -> str:
+    """Render a minute count the way the admin screens talk about it."""
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        if lang == "ar":
+            return f"{hours} ساعة"
+        return f"{hours} hour" + ("" if hours == 1 else "s")
+    if lang == "ar":
+        return f"{minutes} دقيقة"
+    return f"{minutes} minute" + ("" if minutes == 1 else "s")
+
+
+def build_interval_screen(lang: str, current: int):
+    """The scan-interval screen: presets, a custom option, and what's active."""
+    t = adm(lang)
+    msg = (
+        f"{t['interval_title']}\n\n"
+        f"{t['interval_current'].format(value=format_interval(current, lang))}\n\n"
+        f"{t['interval_note']}"
+    )
+
+    rows, row = [], []
+    for preset in INTERVAL_PRESETS:
+        label = format_interval(preset, lang)
+        if preset == current:
+            label = "✅ " + label
+        row.append(InlineKeyboardButton(label, callback_data=f"admin_interval_set_{preset}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(t["interval_custom_btn"], callback_data="admin_interval_custom")])
+    rows.append([InlineKeyboardButton(t["back_admin"], callback_data="admin_menu")])
+    return msg, InlineKeyboardMarkup(rows)
+
+
+def apply_check_interval(context: ContextTypes.DEFAULT_TYPE, minutes: int) -> bool:
+    """Store the new interval and retime the running job.
+
+    Returns False if the live job could not be retimed, in which case the
+    setting is still saved and takes effect on the next start.
+    """
+    set_check_interval(minutes)
+    return reschedule_check(context.bot_data.get("scheduler"), minutes)
+
+
+async def process_scan_interval(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Handle the number of minutes typed after '✏️ Custom…'."""
+    user_id = update.effective_user.id
+    lang = get_lang(context, user_id)
+    t = adm(lang)
+    back = [[InlineKeyboardButton(t["back_admin"], callback_data="admin_menu")]]
+
+    if user_id != ADMIN_ID and not is_admin(user_id):
+        context.user_data["awaiting_scan_interval"] = False
+        await update.message.reply_text(t["admin_only"])
+        return
+
+    cleaned = text.strip()
+    if not cleaned.isdigit():
+        await update.message.reply_text(
+            t["interval_invalid"], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(back)
+        )
+        return
+
+    minutes = int(cleaned)
+    if not MIN_CHECK_INTERVAL_MINUTES <= minutes <= MAX_CHECK_INTERVAL_MINUTES:
+        await update.message.reply_text(
+            t["interval_out_of_range"].format(
+                min=MIN_CHECK_INTERVAL_MINUTES, max=MAX_CHECK_INTERVAL_MINUTES
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(back),
+        )
+        return
+
+    context.user_data["awaiting_scan_interval"] = False
+    applied_live = apply_check_interval(context, minutes)
+    note = t["interval_saved"] if applied_live else t["interval_saved_restart"]
+    msg, keyboard = build_interval_screen(lang, minutes)
+    await update.message.reply_text(
+        f"{note.format(value=format_interval(minutes, lang))}\n\n{msg}",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
     )
 
 
@@ -1192,7 +1314,10 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [[InlineKeyboardButton(t["back_admin"], callback_data="admin_menu")]]
     await update.message.reply_text(
-        build_stats_message(get_authorized_users(), get_all_products(), lang),
+        build_stats_message(
+            get_authorized_users(), get_all_products(), lang,
+            get_check_interval(DEFAULT_INTERVAL),
+        ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -1224,6 +1349,7 @@ async def show_admin_panel(update_or_query, lang: str = "en"):
         [InlineKeyboardButton(t["btn_users"], callback_data="admin_users"),
          InlineKeyboardButton(t["btn_stats"], callback_data="admin_stats")],
         [InlineKeyboardButton(t["btn_view_products"], callback_data="admin_view_products")],
+        [InlineKeyboardButton(t["btn_interval"], callback_data="admin_interval")],
         [InlineKeyboardButton(t["btn_authorize"], callback_data="admin_authorize"),
          InlineKeyboardButton(t["btn_revoke"], callback_data="admin_revoke")],
         [InlineKeyboardButton(t["back"], callback_data="back_to_menu")],
@@ -1279,7 +1405,36 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif action == "admin_stats":
         await query.edit_message_text(
-            build_stats_message(get_authorized_users(), get_all_products(), lang),
+            build_stats_message(
+                get_authorized_users(), get_all_products(), lang,
+                get_check_interval(DEFAULT_INTERVAL),
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(back),
+        )
+
+    elif action == "admin_interval":
+        msg, keyboard = build_interval_screen(lang, get_check_interval(DEFAULT_INTERVAL))
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+
+    elif action.startswith("admin_interval_set_"):
+        minutes = int(action.rsplit("_", 1)[1])
+        context.user_data["awaiting_scan_interval"] = False
+        applied_live = apply_check_interval(context, minutes)
+        note = t["interval_saved"] if applied_live else t["interval_saved_restart"]
+        msg, keyboard = build_interval_screen(lang, minutes)
+        await query.edit_message_text(
+            f"{note.format(value=format_interval(minutes, lang))}\n\n{msg}",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+
+    elif action == "admin_interval_custom":
+        context.user_data["awaiting_scan_interval"] = True
+        await query.edit_message_text(
+            t["interval_prompt"].format(
+                min=MIN_CHECK_INTERVAL_MINUTES, max=MAX_CHECK_INTERVAL_MINUTES
+            ),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(back),
         )
@@ -1519,7 +1674,10 @@ async def handle_preferences_setup(update: Update, context: ContextTypes.DEFAULT
 
 async def post_init(application):
     add_authorized_user(ADMIN_ID, "Admin", True)
-    start_scheduler(application.bot, CHAT_ID, INTERVAL)
+    # Kept on bot_data so the admin panel can retime the job while running.
+    application.bot_data["scheduler"] = start_scheduler(
+        application.bot, CHAT_ID, get_check_interval(DEFAULT_INTERVAL)
+    )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):

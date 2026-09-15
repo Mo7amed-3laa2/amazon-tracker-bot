@@ -13,8 +13,16 @@ logger = logging.getLogger(__name__)
 
 NL = "\n"
 
+PRICE_CHECK_JOB_ID = "price_check"
 
-def get_localized_notification(product_name: str, last_price: float, new_price: float, url: str, lang: str, alert_price: float | None = None) -> str:
+# A sweep fetches every tracked product with warm-up and retries, so it can
+# run for several minutes; below this the next sweep would collide with the
+# one still running (and hammering Amazon is what gets the host IP blocked).
+MIN_CHECK_INTERVAL_MINUTES = 10
+MAX_CHECK_INTERVAL_MINUTES = 7 * 24 * 60
+
+
+def get_localized_notification(product_name: str, last_price: float, new_price: float, url: str, lang: str, alert_price: float | None = None, product_id: int | None = None) -> str:
     """Generate price notification in user's language.
 
     Built as HTML: the product name and the Amazon URL both routinely contain
@@ -23,6 +31,11 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
     leaves the user with a dead link. See formatting.py.
     """
     name = esc(product_name)
+    # The id is what /untrack and the list's edit link work off, so an alert
+    # is actionable without going back to the list to look the item up.
+    id_line = [] if product_id is None else [
+        ("🆔 المعرّف: " if lang == "ar" else "🆔 ID: ") + f"<code>{product_id}</code>"
+    ]
     amazon_link = link(
         "عرض على أمازون" if lang == "ar" else "View on Amazon",
         canonical_product_url(url),
@@ -34,6 +47,7 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
                 "📦 <b>منتج جديد</b>",
                 "",
                 f"<b>{name}</b>",
+                *id_line,
                 f"💰 السعر: <code>EGP {new_price:,.2f}</code>",
                 "",
                 f"🔗 {amazon_link}",
@@ -43,6 +57,7 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
                 "📦 <b>New Product</b>",
                 "",
                 f"<b>{name}</b>",
+                *id_line,
                 f"💰 Price: <code>EGP {new_price:,.2f}</code>",
                 "",
                 f"🔗 {amazon_link}",
@@ -63,6 +78,7 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
             f"{emoji} <b>السعر {'انخفض' if dropped else 'ارتفع'}!</b>",
             "",
             f"📦 <b>{name}</b>",
+            *id_line,
             "━━━━━━━━━━━━━━━━━━",
             f"السعر السابق: <s>EGP {last_price:,.2f}</s>",
             f"السعر الحالي: <code>EGP {new_price:,.2f}</code>",
@@ -77,6 +93,7 @@ def get_localized_notification(product_name: str, last_price: float, new_price: 
             f"{emoji} <b>Price {'dropped' if dropped else 'increased'}!</b>",
             "",
             f"📦 <b>{name}</b>",
+            *id_line,
             "━━━━━━━━━━━━━━━━━━",
             f"Before: <s>EGP {last_price:,.2f}</s>",
             f"Now: <code>EGP {new_price:,.2f}</code>",
@@ -167,7 +184,9 @@ async def check_prices(bot: Bot, chat_id: str):
                     continue
 
                 try:
-                    message = get_localized_notification(product_name, last_price, new_price, url, user_lang, alert_price)
+                    message = get_localized_notification(
+                        product_name, last_price, new_price, url, user_lang, alert_price, product_id
+                    )
                     await bot.send_message(
                         chat_id=user_id,
                         text=message,
@@ -192,7 +211,7 @@ def start_scheduler(bot: Bot, chat_id: str, interval_minutes: int) -> AsyncIOSch
         trigger="interval",
         minutes=interval_minutes,
         args=[bot, chat_id],
-        id="price_check",
+        id=PRICE_CHECK_JOB_ID,
         name="Amazon Price Checker",
         coalesce=True,
         max_instances=1,
@@ -200,3 +219,18 @@ def start_scheduler(bot: Bot, chat_id: str, interval_minutes: int) -> AsyncIOSch
     scheduler.start()
     logger.info(f"[scheduler] Started - checking every {interval_minutes} minute(s).")
     return scheduler
+
+
+def reschedule_check(scheduler, interval_minutes: int) -> bool:
+    """Apply a new check interval to the running scheduler.
+
+    Returns False when there is no live job to retime (the setting is still
+    stored, so it takes effect on the next start).
+    """
+    if scheduler is None or scheduler.get_job(PRICE_CHECK_JOB_ID) is None:
+        logger.warning("[scheduler] No running price_check job to reschedule")
+        return False
+
+    scheduler.reschedule_job(PRICE_CHECK_JOB_ID, trigger="interval", minutes=interval_minutes)
+    logger.info(f"[scheduler] Rescheduled - now checking every {interval_minutes} minute(s).")
+    return True

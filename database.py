@@ -169,6 +169,14 @@ def init_db():
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_products ON user_products(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_product_price_history ON price_history(product_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_authorized_users_status ON authorized_users(status)")
@@ -215,6 +223,51 @@ def init_db():
 
         conn.commit()
         logger.info("[database] Database initialized successfully")
+
+
+# Runtime settings live in the database rather than the environment so an admin
+# can change them from Telegram and have them survive a restart.
+CHECK_INTERVAL_SETTING = "check_interval_minutes"
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key: str, value: str):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            (key, value),
+        )
+
+
+def get_check_interval(default: int) -> int:
+    """Minutes between scheduled price checks, falling back to `default`.
+
+    `default` is what CHECK_INTERVAL_MINUTES says, so an untouched deployment
+    keeps behaving exactly as its .env describes.
+    """
+    raw = get_setting(CHECK_INTERVAL_SETTING)
+    if raw is None:
+        return default
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"[database] Ignoring non-numeric {CHECK_INTERVAL_SETTING}={raw!r}")
+        return default
+    if minutes <= 0:
+        logger.warning(f"[database] Ignoring non-positive {CHECK_INTERVAL_SETTING}={minutes}")
+        return default
+    return minutes
+
+
+def set_check_interval(minutes: int):
+    set_setting(CHECK_INTERVAL_SETTING, str(int(minutes)))
+    logger.info(f"[database] Check interval set to {minutes} minute(s)")
 
 
 def add_product(url: str, name: str, price: float, image_url: str | None = None, merchant_name: str | None = None, is_amazon: bool = True) -> int:
