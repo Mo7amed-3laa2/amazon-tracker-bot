@@ -4,87 +4,87 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from database import (
     get_all_products, update_price, get_user_for_product_notification,
-    get_user_language
+    get_user_language, set_product_availability
 )
-from scraper import fetch_product
+from formatting import esc, link
+from scraper import canonical_product_url, fetch_product
 
 logger = logging.getLogger(__name__)
 
+NL = "\n"
+
 
 def get_localized_notification(product_name: str, last_price: float, new_price: float, url: str, lang: str, alert_price: float | None = None) -> str:
-    """Generate price notification in user's language."""
+    """Generate price notification in user's language.
+
+    Built as HTML: the product name and the Amazon URL both routinely contain
+    characters (`_`, `*`, `(`) that Telegram's Markdown parser would either
+    reject or silently consume — including inside the link target, which
+    leaves the user with a dead link. See formatting.py.
+    """
+    name = esc(product_name)
+    amazon_link = link(
+        "عرض على أمازون" if lang == "ar" else "View on Amazon",
+        canonical_product_url(url),
+    )
+
     if last_price is None or last_price == 0:
         if lang == "ar":
-            return (
-                f"📦 *منتج جديد*\n\n"
-                f"*{product_name}*\n"
-                f"💰 السعر: `EGP {new_price:,.2f}`\n\n"
-                f"🔗 [عرض على أمازون]({url})"
-            )
+            lines = [
+                "📦 <b>منتج جديد</b>",
+                "",
+                f"<b>{name}</b>",
+                f"💰 السعر: <code>EGP {new_price:,.2f}</code>",
+                "",
+                f"🔗 {amazon_link}",
+            ]
         else:
-            return (
-                f"📦 *New Product*\n\n"
-                f"*{product_name}*\n"
-                f"💰 Price: `EGP {new_price:,.2f}`\n\n"
-                f"🔗 [View on Amazon]({url})"
-            )
+            lines = [
+                "📦 <b>New Product</b>",
+                "",
+                f"<b>{name}</b>",
+                f"💰 Price: <code>EGP {new_price:,.2f}</code>",
+                "",
+                f"🔗 {amazon_link}",
+            ]
+        return NL.join(lines)
 
     price_diff = last_price - new_price
     price_percent = (price_diff / last_price) * 100
+    dropped = new_price < last_price
+    emoji = "📉" if dropped else "📈"
+    change_text = ("💚" if dropped else "❤️") + f" <b>EGP {abs(price_diff):,.2f}</b> ({abs(price_percent):.1f}%)"
 
-    if new_price < last_price:
-        emoji = "📉"
-        if lang == "ar":
-            direction = "انخفض"
-            change_text = f"💚 *EGP {abs(price_diff):,.2f}* ({abs(price_percent):.1f}%)"
-            before_text = "السعر السابق"
-            now_text = "السعر الحالي"
-            view_text = "عرض على أمازون"
-        else:
-            direction = "dropped"
-            change_text = f"💚 *EGP {abs(price_diff):,.2f}* ({abs(price_percent):.1f}%)"
-            before_text = "Before"
-            now_text = "Now"
-            view_text = "View on Amazon"
-    else:
-        emoji = "📈"
-        if lang == "ar":
-            direction = "ارتفع"
-            change_text = f"❤️ *EGP {abs(price_diff):,.2f}* ({abs(price_percent):.1f}%)"
-            before_text = "السعر السابق"
-            now_text = "السعر الحالي"
-            view_text = "عرض على أمازون"
-        else:
-            direction = "increased"
-            change_text = f"❤️ *EGP {abs(price_diff):,.2f}* ({abs(price_percent):.1f}%)"
-            before_text = "Before"
-            now_text = "Now"
-            view_text = "View on Amazon"
-
+    lines = []
     if lang == "ar":
-        banner = f"🚨 *وصل إلى سعرك المستهدف `EGP {alert_price:,.2f}`!*\n\n" if alert_price is not None else ""
-        return (
-            f"{banner}"
-            f"{emoji} *السعر {direction}!*\n\n"
-            f"📦 *{product_name}*\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"{before_text}: ~~`EGP {last_price:,.2f}`~~\n"
-            f"{now_text}: `EGP {new_price:,.2f}`\n"
-            f"التغيير: {change_text}\n\n"
-            f"🔗 [{view_text}]({url})"
-        )
+        if alert_price is not None:
+            lines += [f"🚨 <b>وصل إلى سعرك المستهدف <code>EGP {alert_price:,.2f}</code>!</b>", ""]
+        lines += [
+            f"{emoji} <b>السعر {'انخفض' if dropped else 'ارتفع'}!</b>",
+            "",
+            f"📦 <b>{name}</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"السعر السابق: <s>EGP {last_price:,.2f}</s>",
+            f"السعر الحالي: <code>EGP {new_price:,.2f}</code>",
+            f"التغيير: {change_text}",
+            "",
+            f"🔗 {amazon_link}",
+        ]
     else:
-        banner = f"🚨 *Hit your target price of `EGP {alert_price:,.2f}`!*\n\n" if alert_price is not None else ""
-        return (
-            f"{banner}"
-            f"{emoji} *Price {direction}!*\n\n"
-            f"📦 *{product_name}*\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"{before_text}: ~~`EGP {last_price:,.2f}`~~\n"
-            f"{now_text}: `EGP {new_price:,.2f}`\n"
-            f"Change: {change_text}\n\n"
-            f"🔗 [{view_text}]({url})"
-        )
+        if alert_price is not None:
+            lines += [f"🚨 <b>Hit your target price of <code>EGP {alert_price:,.2f}</code>!</b>", ""]
+        lines += [
+            f"{emoji} <b>Price {'dropped' if dropped else 'increased'}!</b>",
+            "",
+            f"📦 <b>{name}</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"Before: <s>EGP {last_price:,.2f}</s>",
+            f"Now: <code>EGP {new_price:,.2f}</code>",
+            f"Change: {change_text}",
+            "",
+            f"🔗 {amazon_link}",
+        ]
+    return NL.join(lines)
 
 
 def _should_notify_user(alert_price: float | None, require_amazon: bool, new_price: float, is_amazon: bool) -> bool:
@@ -116,6 +116,7 @@ async def check_prices(bot: Bot, chat_id: str):
         url = product_data[1]
         product_name = product_data[2]
         last_price = product_data[3]
+        was_available = product_data[7] if len(product_data) > 7 else 1
 
         # Blocking network I/O — keep it off the event loop so the bot stays
         # responsive while a scheduled sweep is running.
@@ -123,6 +124,20 @@ async def check_prices(bot: Bot, chat_id: str):
         if result is None:
             logger.warning(f"[scheduler] Could not fetch: {url}")
             continue
+
+        # Any price still shown on a sold-out page is stale or belongs to
+        # another seller's offer, so it is neither notified on nor stored —
+        # otherwise the bot alerts on a price nobody can pay and then treats
+        # that phantom price as the baseline for the next comparison.
+        if not result.get("available", True):
+            if was_available:
+                logger.info(f"[scheduler] '{product_name}' is now unavailable — holding last known price")
+            set_product_availability(url, False)
+            continue
+
+        if not was_available:
+            logger.info(f"[scheduler] '{product_name}' is available again")
+            set_product_availability(url, True)
 
         new_price = result["price"]
         is_amazon = result.get("is_amazon", True)
@@ -156,7 +171,7 @@ async def check_prices(bot: Bot, chat_id: str):
                     await bot.send_message(
                         chat_id=user_id,
                         text=message,
-                        parse_mode="Markdown",
+                        parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
                     sent_count += 1
@@ -165,7 +180,7 @@ async def check_prices(bot: Bot, chat_id: str):
 
             update_price(url, new_price)
             updated_count += 1
-            logger.info(f"[scheduler] Price changed for '{product_name}': {last_price} → {new_price} ({price_percent:+.1f}%) [notified {sent_count} user(s)]")
+            logger.info(f"[scheduler] Price changed for '{product_name}': {last_price} -> {new_price} ({price_percent:+.1f}%) [notified {sent_count} user(s)]")
 
     logger.info(f"[scheduler] Check complete: {updated_count} product(s) with price changes")
 
@@ -183,5 +198,5 @@ def start_scheduler(bot: Bot, chat_id: str, interval_minutes: int) -> AsyncIOSch
         max_instances=1,
     )
     scheduler.start()
-    logger.info(f"[scheduler] Started — checking every {interval_minutes} minute(s).")
+    logger.info(f"[scheduler] Started - checking every {interval_minutes} minute(s).")
     return scheduler

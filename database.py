@@ -194,6 +194,11 @@ def init_db():
             pass
 
         try:
+            conn.execute("ALTER TABLE products ADD COLUMN available BOOLEAN DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
             conn.execute("ALTER TABLE user_products ADD COLUMN price_min REAL")
         except sqlite3.OperationalError:
             pass
@@ -283,7 +288,8 @@ def remove_user_product(user_id: int, product_id: int):
 def get_all_products():
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, url, name, last_price, previous_price, image_url, added_at FROM products ORDER BY added_at DESC"
+            "SELECT id, url, name, last_price, previous_price, image_url, added_at, available "
+            "FROM products ORDER BY added_at DESC"
         ).fetchall()
     return [tuple(row) for row in rows]
 
@@ -292,7 +298,7 @@ def get_user_products(user_id: int):
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT p.id, p.url, p.name, p.last_price, p.previous_price, p.image_url, p.added_at, p.merchant_name, p.is_amazon,
-                   up.alert_threshold, up.price_min, up.price_max, up.require_amazon_merchant
+                   up.alert_threshold, up.price_min, up.price_max, up.require_amazon_merchant, p.available
             FROM products p
             JOIN user_products up ON p.id = up.product_id
             WHERE up.user_id = ?
@@ -306,11 +312,25 @@ def update_price(url: str, new_price: float):
         product = conn.execute("SELECT id FROM products WHERE url = ?", (url,)).fetchone()
         if product:
             conn.execute(
-                "UPDATE products SET previous_price = last_price, last_price = ? WHERE url = ?",
+                "UPDATE products SET previous_price = last_price, last_price = ?, available = 1 WHERE url = ?",
                 (new_price, url),
             )
             # Same connection, same reason as add_product — see _insert_price_history.
             _insert_price_history(conn, product[0], new_price)
+
+
+def set_product_availability(url: str, available: bool):
+    """Record whether the listing is currently buyable.
+
+    Kept separate from update_price: an unavailable page's price is stale or
+    belongs to another seller's offer, so it must not become the new baseline
+    that the next comparison is made against.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE products SET available = ? WHERE url = ?",
+            (1 if available else 0, url),
+        )
 
 
 def _insert_price_history(conn, product_id: int, price: float):
@@ -354,7 +374,8 @@ def remove_product(product_id: int):
 def get_product_by_id(product_id: int):
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, url, name, last_price, previous_price, image_url, added_at, merchant_name, is_amazon FROM products WHERE id = ?",
+            "SELECT id, url, name, last_price, previous_price, image_url, added_at, merchant_name, is_amazon, available "
+            "FROM products WHERE id = ?",
             (product_id,),
         ).fetchone()
     return tuple(row) if row else None

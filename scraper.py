@@ -99,6 +99,16 @@ def _canonical_url(url: str) -> str | None:
     return f"{_origin(url)}/dp/{asin}"
 
 
+def canonical_product_url(url: str) -> str:
+    """The clean /dp/<ASIN> form of a URL, or the URL unchanged if it has no ASIN.
+
+    Used for the links shown in Telegram: share URLs carry a long tail of
+    tracking parameters that only make the message longer and the link more
+    fragile.
+    """
+    return _canonical_url(url) or url
+
+
 def _headers_for(origin: str) -> dict:
     headers = dict(BASE_HEADERS)
     headers["Referer"] = origin + "/"
@@ -223,6 +233,25 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
         soup = BeautifulSoup(html, "lxml")
 
         name = _extract_name(soup, lang)
+        available = _extract_availability(soup)
+
+        # An unavailable listing is reported rather than parsed further: its
+        # remaining prices are stale or belong to someone else's offer, so
+        # callers must be able to tell "sold out" apart from "fetch failed".
+        if not available:
+            logger.info(f"[scraper] '{name[:40]}' is unavailable — reporting without a price")
+            return {
+                "name": name,
+                "price": None,
+                "image": _extract_image(soup),
+                "description": None,
+                "specs": None,
+                "merchant_name": None,
+                "is_amazon": True,
+                "available": False,
+                "language": lang,
+            }
+
         price = _extract_price(soup, html)
         image_url = _extract_image(soup)
         description = _extract_description(soup, lang)
@@ -247,6 +276,7 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
             "specs": specs,
             "merchant_name": merchant_name,
             "is_amazon": is_amazon,
+            "available": True,
             "language": lang,
         }
     except Exception as e:
@@ -362,6 +392,86 @@ def _extract_merchant(soup: BeautifulSoup) -> tuple[str | None, bool]:
     return None, True
 
 
+# Amazon keeps rendering prices on a listing nobody can buy: the struck-through
+# list price, the "other sellers" box and the related-items carousels all use
+# the same `a-price` markup. These markers identify such a page so a sold-out
+# item is not reported as a price change.
+UNAVAILABLE_MARKERS = (
+    "currently unavailable",
+    "out of stock",
+    "temporarily out of stock",
+    "we don't know when or if this item will be back",
+    "غير متوفر",
+    "غير متاح",
+    "نفدت الكمية",
+)
+
+# A listing that can actually be bought renders one of these; an unavailable
+# one renders none of them, even while it still shows a price.
+BUYABLE_SELECTORS = (
+    "#add-to-cart-button",
+    "#buy-now-button",
+    "input[name='submit.add-to-cart']",
+    "#buybox-see-all-buying-choices",
+    "#dynamic-aod-ingress-box",
+)
+
+OUT_OF_STOCK_SELECTORS = ("#outOfStock", "#outOfStockBuyBox_feature_div")
+
+AVAILABILITY_SELECTORS = ("#availability", "#availability_feature_div")
+
+
+def _extract_availability(soup: BeautifulSoup) -> bool:
+    """Whether the page is actually offering this item for sale right now."""
+    for selector in OUT_OF_STOCK_SELECTORS:
+        if soup.select_one(selector):
+            logger.info(f"[scraper] Item unavailable: '{selector}' present")
+            return False
+
+    for selector in AVAILABILITY_SELECTORS:
+        el = soup.select_one(selector)
+        if not el:
+            continue
+        text = _normalize_digits(el.get_text(" ", strip=True)).lower()
+        if any(marker in text for marker in UNAVAILABLE_MARKERS):
+            logger.info(f"[scraper] Item unavailable: availability reads '{text[:60]}'")
+            return False
+
+    if any(soup.select_one(selector) for selector in BUYABLE_SELECTORS):
+        return True
+
+    # No buy affordance and no explicit notice. Treating this as unavailable
+    # costs at most a missed notification, whereas trusting it means alerting
+    # on a price that cannot be paid.
+    logger.warning("[scraper] No add-to-cart/buying-options element found — treating as unavailable")
+    return False
+
+
+# Price markup in these blocks belongs to other products (recommendation
+# carousels, sponsored strips, comparison tables), not to this listing.
+NON_OFFER_BLOCK_MARKERS = (
+    "carousel",
+    "sims",
+    "similarities",
+    "sponsored",
+    "related",
+    "comparison",
+    "bundle",
+    "shopping-aids",
+)
+
+# Holds the title, price and buy box and nothing from further down the page.
+OFFER_SCOPE_SELECTORS = ("#ppd", "#centerCol")
+
+
+def _in_non_offer_block(el) -> bool:
+    for parent in el.parents:
+        ident = f"{parent.get('id') or ''} {' '.join(parent.get('class') or [])}".lower()
+        if any(marker in ident for marker in NON_OFFER_BLOCK_MARKERS):
+            return True
+    return False
+
+
 # Ordered most-specific first: the buy-box / core price blocks come before the
 # generic ones, because the first `.a-offscreen` on a page is frequently the
 # struck-through list price rather than the price actually being charged.
@@ -400,30 +510,20 @@ PRICE_JSON_PATTERNS = (
 
 
 def _extract_price(soup: BeautifulSoup, html: str | None = None) -> float | None:
-    for selector in PRICE_SELECTORS:
-        el = soup.select_one(selector)
-        if not el:
-            continue
+    """Find the price being charged for *this* listing.
 
-        raw = el.get_text(strip=True)
-
-        # `a-price-whole` holds only the integer part; the decimals live in a
-        # sibling `a-price-fraction`. Without stitching them together a price of
-        # 1,299.99 would be read as 1299 — or as 129999 once separators are
-        # stripped, depending on the trailing separator Amazon renders.
-        if "a-price-whole" in (el.get("class") or []):
-            fraction = el.find_next("span", {"class": "a-price-fraction"})
-            whole = re.sub(r"[^\d]", "", _normalize_digits(raw))
-            if whole:
-                if fraction:
-                    frac_digits = re.sub(r"[^\d]", "", _normalize_digits(fraction.get_text(strip=True)))
-                    raw = f"{whole}.{frac_digits or '0'}"
-                else:
-                    raw = whole
-
-        price = _parse_price(raw)
+    Searched inside the offer area first (title/price/buy box) and, only if
+    that finds nothing, across the whole page while skipping recommendation
+    and comparison blocks — their `a-price` markup belongs to other products
+    and is what made an unavailable item look like a huge price change.
+    """
+    scope = next(
+        (el for selector in OFFER_SCOPE_SELECTORS if (el := soup.select_one(selector))),
+        None,
+    )
+    for root in (scope, soup) if scope is not None else (soup,):
+        price = _price_from(root, root is soup)
         if price is not None:
-            logger.debug(f"[scraper] Price matched via '{selector}': {price}")
             return price
 
     if html:
@@ -434,6 +534,36 @@ def _extract_price(soup: BeautifulSoup, html: str | None = None) -> float | None
                 if price is not None:
                     logger.debug(f"[scraper] Price matched via JSON pattern: {price}")
                     return price
+
+    return None
+
+
+def _price_from(root, skip_non_offer_blocks: bool) -> float | None:
+    for selector in PRICE_SELECTORS:
+        for el in root.select(selector):
+            if skip_non_offer_blocks and _in_non_offer_block(el):
+                continue
+
+            raw = el.get_text(strip=True)
+
+            # `a-price-whole` holds only the integer part; the decimals live in a
+            # sibling `a-price-fraction`. Without stitching them together a price of
+            # 1,299.99 would be read as 1299 — or as 129999 once separators are
+            # stripped, depending on the trailing separator Amazon renders.
+            if "a-price-whole" in (el.get("class") or []):
+                fraction = el.find_next("span", {"class": "a-price-fraction"})
+                whole = re.sub(r"[^\d]", "", _normalize_digits(raw))
+                if whole:
+                    if fraction:
+                        frac_digits = re.sub(r"[^\d]", "", _normalize_digits(fraction.get_text(strip=True)))
+                        raw = f"{whole}.{frac_digits or '0'}"
+                    else:
+                        raw = whole
+
+            price = _parse_price(raw)
+            if price is not None:
+                logger.debug(f"[scraper] Price matched via '{selector}': {price}")
+                return price
 
     return None
 

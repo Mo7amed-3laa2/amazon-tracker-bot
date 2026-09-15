@@ -19,7 +19,8 @@ from database import (
     get_authorized_users, get_user_language, set_user_language, get_price_history,
     update_user_product_preferences, clear_user_product_alert
 )
-from scraper import fetch_product
+from formatting import esc, link
+from scraper import canonical_product_url, fetch_product
 from scheduler import start_scheduler
 
 load_dotenv()
@@ -219,24 +220,37 @@ def build_products_list_message(products, lang: str = "en", bot_username: str | 
     re-opens /start with a hidden argument — clicking it does the same thing
     as the edit_product_<id> callback button, without needing a button row
     per item.
+
+    Rendered as HTML, and every product-derived value goes through esc().
+    Telegram's Markdown parser also scans link targets for entity markers, so
+    with parse_mode="Markdown" an Amazon URL containing `_` lost those
+    characters and the link either pointed somewhere else or was dropped and
+    left as grey text — which took the edit deep link, bot username and all,
+    down with it. See formatting.py.
     """
     if not products:
         if lang == "ar":
-            return "📦 *المنتجات المتتبعة:*\n\nلا توجد منتجات مراقبة حاليًا."
-        return "📦 *Tracked Products:*\n\nNo products tracked yet."
+            return "📦 <b>المنتجات المتتبعة:</b>\n\nلا توجد منتجات مراقبة حاليًا."
+        return "📦 <b>Tracked Products:</b>\n\nNo products tracked yet."
 
     if lang == "ar":
-        lines = [f"📦 *المنتجات المتتبعة* ({len(products)})\n"]
+        lines = [f"📦 <b>المنتجات المتتبعة</b> ({len(products)})\n"]
         alert_text = "تنبيه"
         view_text = "أمازون"
         edit_text = "تعديل"
+        unavailable_text = "غير متوفر"
+        other_seller_text = "بائع آخر"
     else:
-        lines = [f"📦 *Tracked Products* ({len(products)})\n"]
+        lines = [f"📦 <b>Tracked Products</b> ({len(products)})\n"]
         alert_text = "Alert"
         view_text = "Amazon"
         edit_text = "Edit"
+        unavailable_text = "Unavailable"
+        other_seller_text = "Other seller"
 
-    for pid, url, name, last_price, prev_price, image_url, added_at, merchant_name, is_amazon, alert_threshold, price_min, price_max, require_amazon_merchant in products:
+    for (pid, url, name, last_price, prev_price, image_url, added_at, merchant_name,
+         is_amazon, alert_threshold, price_min, price_max, require_amazon_merchant,
+         available) in products:
         current_str = f"EGP {last_price:,.2f}" if last_price is not None else "N/A"
 
         change_info = ""
@@ -247,21 +261,25 @@ def build_products_list_message(products, lang: str = "en", bot_username: str | 
             change_info = f" ({emoji}{abs(pct):.0f}%)"
 
         # Only call out the seller when it's NOT Amazon — Amazon is the assumed default.
-        merchant_info = "" if is_amazon else f" · 🛒 {merchant_name or 'Other seller'}"
+        merchant_info = "" if is_amazon else f" · 🛒 {esc(merchant_name or other_seller_text)}"
+
+        # The stored price is the last one seen while the item was buyable, so
+        # say so rather than presenting it as a live price.
+        stock_info = "" if available is None or available else f" · ⚠️ {unavailable_text}"
 
         alert_info = ""
         if price_max is not None:
-            alert_info = f" · 🚨 {alert_text} `≤EGP {price_max:,.0f}`"
+            alert_info = f" · 🚨 {alert_text} <code>≤EGP {price_max:,.0f}</code>"
 
         short_name = name[:45] + ("…" if len(name) > 45 else "")
 
-        links = f"🔗 [{view_text}]({url})"
+        links = "🔗 " + link(view_text, canonical_product_url(url))
         if bot_username:
-            links += f" · [✏️ {edit_text}](https://t.me/{bot_username}?start=edit_{pid})"
+            links += " · " + link(f"✏️ {edit_text}", f"https://t.me/{bot_username}?start=edit_{pid}")
 
         lines.append(
-            f"*{pid}.* {short_name}\n"
-            f"💰 `{current_str}`{change_info}{merchant_info}{alert_info}\n"
+            f"<b>{pid}.</b> {esc(short_name)}\n"
+            f"💰 <code>{current_str}</code>{change_info}{merchant_info}{stock_info}{alert_info}\n"
             f"{links}\n"
         )
 
@@ -446,7 +464,7 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             msg = build_products_list_message(products, lang, bot_username=context.bot.username)
             keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
-            await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(msg, parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "check":
         user_is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
@@ -585,6 +603,20 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await status.edit_text(msg, parse_mode="Markdown")
         return
 
+    # Nothing useful can be tracked from a sold-out listing: it has no price of
+    # its own, only a stale one or another seller's offer.
+    if not result.get("available", True):
+        if lang == "ar":
+            msg = ("⚠️ *المنتج غير متوفر حاليًا*\n\n"
+                   "_أمازون لا تعرض سعرًا لهذا المنتج الآن._\n\n"
+                   "جرّب إضافته مرة أخرى عندما يعود للتوفر.")
+        else:
+            msg = ("⚠️ *This product is currently unavailable*\n\n"
+                   "_Amazon isn't showing a price for it right now._\n\n"
+                   "Try adding it again once it's back in stock.")
+        await status.edit_text(msg, parse_mode="Markdown")
+        return
+
     product_id = add_product(
         url,
         result["name"],
@@ -595,24 +627,25 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     )
     add_user_product(user_id, product_id)
 
-    merchant_badge = "✅ Amazon" if result.get("is_amazon", True) else f"🛒 {result.get('merchant_name', 'Other seller')}"
+    merchant_badge = "✅ Amazon" if result.get("is_amazon", True) else f"🛒 {esc(result.get('merchant_name') or 'Other seller')}"
+    product_title = esc(result['name'][:60])
     if lang == "ar":
         success_msg = (
-            f"✅ *تمت الإضافة بنجاح!*\n\n"
-            f"📦 *{result['name'][:60]}*\n"
-            f"💰 السعر: `EGP {result['price']:,.2f}`\n"
+            f"✅ <b>تمت الإضافة بنجاح!</b>\n\n"
+            f"📦 <b>{product_title}</b>\n"
+            f"💰 السعر: <code>EGP {result['price']:,.2f}</code>\n"
             f"🏪 البائع: {merchant_badge}\n\n"
-            f"_يمكنك تعيين سعر تنبيه ليصلك إشعار عند انخفاض السعر إليه._"
+            f"<i>يمكنك تعيين سعر تنبيه ليصلك إشعار عند انخفاض السعر إليه.</i>"
         )
         prefs_btn = "🚨 تعيين سعر التنبيه"
         skip_btn = "⏭️ لاحقًا"
     else:
         success_msg = (
-            f"✅ *Successfully Added!*\n\n"
-            f"📦 *{result['name'][:60]}*\n"
-            f"💰 Price: `EGP {result['price']:,.2f}`\n"
+            f"✅ <b>Successfully Added!</b>\n\n"
+            f"📦 <b>{product_title}</b>\n"
+            f"💰 Price: <code>EGP {result['price']:,.2f}</code>\n"
             f"🏪 Seller: {merchant_badge}\n\n"
-            f"_You can set an alert price to get notified when it drops to that price._"
+            f"<i>You can set an alert price to get notified when it drops to that price.</i>"
         )
         prefs_btn = "🚨 Set alert price"
         skip_btn = "⏭️ Later"
@@ -626,7 +659,7 @@ async def process_track_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     await status.edit_text(
         success_msg,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     context.user_data["awaiting_track_url"] = False
@@ -747,7 +780,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
     await update.message.reply_text(
         msg,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -945,7 +978,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
         await update.message.reply_text(
             msg,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1042,7 +1075,7 @@ ADMIN_STRINGS = {
         "users_title": "👥 *Authorized Users*",
         "no_users": "No users authorized yet.",
         "select_user_products": "Select a user to view their products:",
-        "user_products_title": "📦 *Products for {name}*",
+        "user_products_title": "📦 <b>Products for {name}</b>",
         "user_no_products": "This user has no tracked products yet.",
         "badge_admin": "🔐 Admin",
         "badge_user": "✅ User",
@@ -1077,7 +1110,7 @@ ADMIN_STRINGS = {
         "users_title": "👥 *المستخدمون المصرح لهم*",
         "no_users": "لا يوجد مستخدمون حتى الآن.",
         "select_user_products": "اختر مستخدمًا لعرض منتجاته:",
-        "user_products_title": "📦 *منتجات {name}*",
+        "user_products_title": "📦 <b>منتجات {name}</b>",
         "user_no_products": "هذا المستخدم لم يضف أي منتجات حتى الآن.",
         "badge_admin": "🔐 مشرف",
         "badge_user": "✅ مستخدم",
@@ -1293,18 +1326,18 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not products:
             msg = t["user_no_products"]
             await query.edit_message_text(
-                f"{t['user_products_title'].format(name=user_name)}\n\n{msg}",
-                parse_mode="Markdown",
+                f"{t['user_products_title'].format(name=esc(user_name))}\n\n{esc(msg)}",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(back)
             )
         else:
             full_msg = build_products_list_message(products, lang)
             # Extract just the products part (skip the title from build_products_list_message)
             products_content = full_msg.split("\n", 1)[1] if "\n" in full_msg else full_msg
-            display_msg = f"{t['user_products_title'].format(name=user_name)}\n\n{products_content}"
+            display_msg = f"{t['user_products_title'].format(name=esc(user_name))}\n\n{products_content}"
             await query.edit_message_text(
                 display_msg,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup(back)
             )
@@ -1325,26 +1358,32 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def build_product_edit_screen(product, user_product, lang: str):
-    """Build the edit screen message and keyboard for one tracked product."""
+    """Build the edit screen message and keyboard for one tracked product.
+
+    HTML for the same reason as the product list: the name is Amazon's text
+    and regularly contains Markdown control characters.
+    """
     product_id = product[0]
     name = product[2]
     current_price = product[3]
     merchant_name = product[7] if len(product) > 7 else None
     is_amazon = product[8] if len(product) > 8 else True
+    available = product[9] if len(product) > 9 else 1
 
     alert_price = user_product[11]
     amazon_only = bool(user_product[12])
 
     price_str = f"EGP {current_price:,.2f}" if current_price is not None else "N/A"
-    merchant_badge = "✅ Amazon" if is_amazon else f"🛒 {merchant_name or 'Other seller'}"
+    merchant_badge = "✅ Amazon" if is_amazon else f"🛒 {esc(merchant_name or 'Other seller')}"
 
     if lang == "ar":
         msg = (
-            f"📦 *{name}*\n\n"
-            f"💰 السعر الحالي: `{price_str}`\n"
+            f"📦 <b>{esc(name)}</b>\n\n"
+            f"💰 السعر الحالي: <code>{price_str}</code>\n"
             f"🏪 البائع: {merchant_badge}\n"
-            f"🚨 نبّهني إذا وصل إلى: "
-            + (f"`EGP {alert_price:,.2f}` أو أقل\n" if alert_price is not None else "_غير محدد_\n")
+            + ("" if available is None or available else "⚠️ غير متوفر حاليًا على أمازون\n")
+            + f"🚨 نبّهني إذا وصل إلى: "
+            + (f"<code>EGP {alert_price:,.2f}</code> أو أقل\n" if alert_price is not None else "<i>غير محدد</i>\n")
             + f"🔒 أمازون فقط: {'نعم' if amazon_only else 'لا'}\n"
         )
         set_btn = "🚨 تعديل سعر التنبيه"
@@ -1354,11 +1393,12 @@ def build_product_edit_screen(product, user_product, lang: str):
         back_btn = "◀ العودة للقائمة"
     else:
         msg = (
-            f"📦 *{name}*\n\n"
-            f"💰 Current price: `{price_str}`\n"
+            f"📦 <b>{esc(name)}</b>\n\n"
+            f"💰 Current price: <code>{price_str}</code>\n"
             f"🏪 Seller: {merchant_badge}\n"
-            f"🚨 Notify me at: "
-            + (f"`EGP {alert_price:,.2f}` or below\n" if alert_price is not None else "_not set_\n")
+            + ("" if available is None or available else "⚠️ Currently unavailable on Amazon\n")
+            + f"🚨 Notify me at: "
+            + (f"<code>EGP {alert_price:,.2f}</code> or below\n" if alert_price is not None else "<i>not set</i>\n")
             + f"🔒 Amazon only: {'yes' if amazon_only else 'no'}\n"
         )
         set_btn = "🚨 Set alert price"
@@ -1387,7 +1427,7 @@ async def show_product_edit_screen(query, context, user_id: int, product_id: int
         return False
 
     msg, keyboard = build_product_edit_screen(product, user_product, lang)
-    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    await query.edit_message_text(msg, parse_mode="HTML", reply_markup=keyboard)
     return True
 
 
@@ -1406,7 +1446,7 @@ async def send_product_edit_screen(update: Update, context: ContextTypes.DEFAULT
         return False
 
     msg, keyboard = build_product_edit_screen(product, user_product, lang)
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=keyboard)
     return True
 
 
@@ -1460,16 +1500,16 @@ async def handle_preferences_setup(update: Update, context: ContextTypes.DEFAULT
         if product is None:
             return
         if lang == "ar":
-            msg = f"⚠️ *هل تريد إزالة هذا المنتج؟*\n\n📦 {product[2]}"
+            msg = f"⚠️ <b>هل تريد إزالة هذا المنتج؟</b>\n\n📦 {esc(product[2])}"
             yes_btn, no_btn = "✅ نعم، احذفه", "◀ إلغاء"
         else:
-            msg = f"⚠️ *Remove this product?*\n\n📦 {product[2]}"
+            msg = f"⚠️ <b>Remove this product?</b>\n\n📦 {esc(product[2])}"
             yes_btn, no_btn = "✅ Yes, remove", "◀ Cancel"
         keyboard = [[
             InlineKeyboardButton(yes_btn, callback_data=f"doremove_{product_id}"),
             InlineKeyboardButton(no_btn, callback_data=f"edit_product_{product_id}"),
         ]]
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action.startswith("doremove_"):
         remove_user_product(user_id, product_id)
