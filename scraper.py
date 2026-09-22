@@ -146,17 +146,11 @@ def _resolve_short_link(session, url: str) -> str:
         return url
 
 
-def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | None:
-    """
-    Scrape an Amazon product page and return name, price, specs, and image.
-    Includes retry logic with exponential backoff.
+def fetch_html(url: str) -> str | None:
+    """Fetch a product page's HTML, rotating fingerprints across retries.
 
-    Args:
-        url: Amazon product URL
-        lang: Language code ('en' or 'ar')
-        retry_count: Internal retry counter (don't set manually)
-
-    Returns None if the page could not be parsed.
+    Split out of fetch_product so diagnostics can look at exactly the page the
+    scraper saw without re-implementing the warm-up and retry logic.
     """
     MAX_ATTEMPTS = 3
 
@@ -227,6 +221,23 @@ def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | No
             f"[scraper] Giving up on {url} after {MAX_ATTEMPTS} attempts — "
             f"Amazon is blocking this host's IP."
         )
+    return html
+
+
+def fetch_product(url: str, lang: str = "en", retry_count: int = 0) -> dict | None:
+    """
+    Scrape an Amazon product page and return name, price, specs, and image.
+    Includes retry logic with exponential backoff.
+
+    Args:
+        url: Amazon product URL
+        lang: Language code ('en' or 'ar')
+        retry_count: Internal retry counter (don't set manually)
+
+    Returns None if the page could not be parsed.
+    """
+    html = fetch_html(url)
+    if html is None:
         return None
 
     try:
@@ -472,17 +483,77 @@ def _in_non_offer_block(el) -> bool:
     return False
 
 
+# On a discounted listing Amazon renders the struck-through list price ("was
+# EGP1,200.00") with exactly the same `a-price` / `a-offscreen` markup as the
+# price being charged, and frequently earlier in the DOM. A selector that only
+# asks for `a-price` therefore reports the pre-discount price. These markers
+# identify the list-price wrapper so its contents are never taken as the price.
+LIST_PRICE_CLASSES = {
+    "basisprice",
+    "a-text-strike",
+    "a-price-strike",
+    "pricestrikethrough",
+    "priceblockstrikepricestring",
+    "a-text-price-strike",
+}
+
+LIST_PRICE_IDS = {
+    "listprice",
+    "priceblock_listprice",
+    "print-list-price",
+}
+
+# Climbing past the price block teaches nothing more, so stop there.
+PRICE_BLOCK_IDS = {
+    "corePriceDisplay_desktop_feature_div",
+    "corePrice_feature_div",
+    "apex_desktop",
+    "ppd",
+    "centerCol",
+}
+
+
+def _is_list_price(el) -> bool:
+    """Whether this price element is the struck-through list/"was" price."""
+    node = el
+    while node is not None and hasattr(node, "get"):
+        if node.get("data-a-strike") == "true":
+            return True
+        if {c.lower() for c in (node.get("class") or [])} & LIST_PRICE_CLASSES:
+            return True
+        if (node.get("id") or "").lower() in LIST_PRICE_IDS:
+            return True
+        if node.get("id") in PRICE_BLOCK_IDS:
+            break
+        node = node.parent
+    return False
+
+
 # Ordered most-specific first: the buy-box / core price blocks come before the
 # generic ones, because the first `.a-offscreen` on a page is frequently the
 # struck-through list price rather than the price actually being charged.
 PRICE_SELECTORS = (
     "#corePriceDisplay_desktop_feature_div span.priceToPay span.a-offscreen",
+    "#corePriceDisplay_desktop_feature_div span.apexPriceToPay span.a-offscreen",
+    "#corePriceDisplay_desktop_feature_div span.apex-pricetopay-value span.a-offscreen",
+    # amazon.eg leaves the price-to-pay `a-offscreen` empty and renders the
+    # digits only in the aria-hidden whole/fraction spans, so those have to be
+    # read before falling back to any generic `a-price` on the page.
+    "#corePriceDisplay_desktop_feature_div span.priceToPay span.a-price-whole",
+    "#corePriceDisplay_desktop_feature_div span.apex-pricetopay-value span.a-price-whole",
     "#corePriceDisplay_desktop_feature_div span.a-price span.a-offscreen",
+    "#corePrice_feature_div span.priceToPay span.a-offscreen",
+    "#corePrice_feature_div span.apexPriceToPay span.a-offscreen",
     "#corePrice_feature_div span.a-price span.a-offscreen",
     "#corePrice_desktop span.a-price span.a-offscreen",
     "#apex_desktop span.priceToPay span.a-offscreen",
+    "#apex_desktop span.apexPriceToPay span.a-offscreen",
     "#apex_desktop span.a-price span.a-offscreen",
     "span.priceToPay span.a-offscreen",
+    "span.apexPriceToPay span.a-offscreen",
+    "span.apex-pricetopay-value span.a-offscreen",
+    "span.priceToPay span.a-price-whole",
+    "span.apex-pricetopay-value span.a-price-whole",
     "span.reinventPricePriceToPayMargin span.a-offscreen",
     "#price_inside_buybox",
     "#newBuyBoxPrice",
@@ -524,17 +595,60 @@ def _extract_price(soup: BeautifulSoup, html: str | None = None) -> float | None
     for root in (scope, soup) if scope is not None else (soup,):
         price = _price_from(root, root is soup)
         if price is not None:
+            return _corrected_for_discount(soup, html, price)
+
+    return _price_from_json(html)
+
+
+def _price_from_json(html: str | None) -> float | None:
+    """The price Amazon embeds in its inline JSON payloads."""
+    if not html:
+        return None
+    for pattern in PRICE_JSON_PATTERNS:
+        match = re.search(pattern, html)
+        if match:
+            price = _parse_price(match.group(1))
+            if price is not None:
+                logger.debug(f"[scraper] Price matched via JSON pattern: {price}")
+                return price
+    return None
+
+
+def _corrected_for_discount(soup: BeautifulSoup, html: str | None, price: float) -> float:
+    """Catch the case where the price picked is the pre-discount list price.
+
+    A page that shows a savings badge ("-18%") alongside a struck-through list
+    price is by definition charging less than that list price, so a match equal
+    to it means the discounted price was rendered with markup this scraper does
+    not recognise. Amazon's inline JSON carries the real one.
+    """
+    basis = _basis_price(soup)
+    if basis is None or abs(price - basis) > 0.01:
+        return price
+    if not soup.select_one("span.savingsPercentage, span.savingPriceOverride, #dealBadge"):
+        return price
+
+    json_price = _price_from_json(html)
+    if json_price is not None and json_price < basis:
+        logger.warning(
+            f"[scraper] Matched the list price {basis:,.2f} on a discounted listing; "
+            f"using the JSON price {json_price:,.2f} instead"
+        )
+        return json_price
+
+    logger.warning(
+        f"[scraper] Listing shows a discount but the only price found is the "
+        f"list price {basis:,.2f} — reporting it; price markup may have changed"
+    )
+    return price
+
+
+def _basis_price(soup: BeautifulSoup) -> float | None:
+    """The struck-through "was" price, if the page shows one."""
+    for el in soup.select("span.basisPrice span.a-offscreen, span[data-a-strike='true'] span.a-offscreen"):
+        price = _parse_price(el.get_text(strip=True))
+        if price is not None:
             return price
-
-    if html:
-        for pattern in PRICE_JSON_PATTERNS:
-            match = re.search(pattern, html)
-            if match:
-                price = _parse_price(match.group(1))
-                if price is not None:
-                    logger.debug(f"[scraper] Price matched via JSON pattern: {price}")
-                    return price
-
     return None
 
 
@@ -542,6 +656,9 @@ def _price_from(root, skip_non_offer_blocks: bool) -> float | None:
     for selector in PRICE_SELECTORS:
         for el in root.select(selector):
             if skip_non_offer_blocks and _in_non_offer_block(el):
+                continue
+
+            if _is_list_price(el):
                 continue
 
             raw = el.get_text(strip=True)
