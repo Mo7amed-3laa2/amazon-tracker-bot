@@ -18,7 +18,7 @@ from database import (
     is_user_authorized, is_admin, add_authorized_user, remove_authorized_user,
     get_authorized_users, get_user_language, set_user_language, get_price_history,
     update_user_product_preferences, clear_user_product_alert,
-    get_check_interval, set_check_interval
+    get_check_interval, set_check_interval, get_last_scan
 )
 from formatting import esc, link
 from scraper import canonical_product_url, fetch_product
@@ -219,8 +219,64 @@ def build_tracking_success_message(product_name: str, price: float, lang: str = 
     )
 
 
-def build_products_list_message(products, lang: str = "en", bot_username: str | None = None) -> str:
-    """Build the products list message with per-item 'View on Amazon' and 'Edit' text links.
+# Telegram rejects any message over 4096 characters (counted in UTF-16 code
+# units after entity parsing) with "Message is too long". Measuring the raw
+# HTML in UTF-16 units over-counts (tags are free), so staying under this is
+# always safe.
+TELEGRAM_MESSAGE_LIMIT = 4000
+
+
+def _tg_len(text: str) -> int:
+    """Length as Telegram counts it: an emoji is two UTF-16 units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def paginate_blocks(header: str, blocks: list[str], limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """Pack header + blocks into as few messages as fit under `limit`.
+
+    Splits only between blocks, so an item (and its HTML tags) is never cut
+    in half across two messages.
+    """
+    pages, current = [], header
+    for block in blocks:
+        candidate = f"{current}\n{block}" if current else block
+        if current and _tg_len(candidate) > limit:
+            pages.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        pages.append(current)
+    return pages
+
+
+async def send_pages(pages: list[str], reply_markup, *, query=None, message=None):
+    """Deliver a multi-page HTML message, keeping the keyboard on the last page.
+
+    With `query`, the first page replaces the callback's message in place and
+    the rest follow as new messages; with `message`, every page is a reply.
+    """
+    for i, page in enumerate(pages):
+        kwargs = dict(
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup if i == len(pages) - 1 else None,
+        )
+        if query is not None and i == 0:
+            await query.edit_message_text(page, **kwargs)
+        elif query is not None:
+            await query.message.reply_text(page, **kwargs)
+        else:
+            await message.reply_text(page, **kwargs)
+
+
+def build_products_list_pages(products, lang: str = "en", bot_username: str | None = None, title: str | None = None) -> list[str]:
+    """Build the products list with per-item 'View on Amazon' and 'Edit' text links.
+
+    Returned as one or more messages: a single message is capped at 4096
+    characters, so a long list is split between items (see paginate_blocks).
+    `title` replaces the default heading, e.g. for the admin's view of
+    another user's list.
 
     The edit link is a Telegram deep link (t.me/<bot>?start=edit_<id>) that
     re-opens /start with a hidden argument — clicking it does the same thing
@@ -236,24 +292,28 @@ def build_products_list_message(products, lang: str = "en", bot_username: str | 
     """
     if not products:
         if lang == "ar":
-            return "📦 <b>المنتجات المتتبعة:</b>\n\nلا توجد منتجات مراقبة حاليًا."
-        return "📦 <b>Tracked Products:</b>\n\nNo products tracked yet."
+            return ["📦 <b>المنتجات المتتبعة:</b>\n\nلا توجد منتجات مراقبة حاليًا."]
+        return ["📦 <b>Tracked Products:</b>\n\nNo products tracked yet."]
 
     if lang == "ar":
-        lines = [f"📦 <b>المنتجات المتتبعة</b> ({len(products)})\n"]
+        header = f"📦 <b>المنتجات المتتبعة</b> ({len(products)})\n"
         alert_text = "تنبيه"
         view_text = "أمازون"
         edit_text = "تعديل"
         unavailable_text = "غير متوفر"
         other_seller_text = "بائع آخر"
     else:
-        lines = [f"📦 <b>Tracked Products</b> ({len(products)})\n"]
+        header = f"📦 <b>Tracked Products</b> ({len(products)})\n"
         alert_text = "Alert"
         view_text = "Amazon"
         edit_text = "Edit"
         unavailable_text = "Unavailable"
         other_seller_text = "Other seller"
 
+    if title is not None:
+        header = f"{title} ({len(products)})\n"
+
+    blocks = []
     for (pid, url, name, last_price, prev_price, image_url, added_at, merchant_name,
          is_amazon, alert_threshold, price_min, price_max, require_amazon_merchant,
          available) in products:
@@ -283,13 +343,13 @@ def build_products_list_message(products, lang: str = "en", bot_username: str | 
         if bot_username:
             links += " · " + link(f"✏️ {edit_text}", f"https://t.me/{bot_username}?start=edit_{pid}")
 
-        lines.append(
+        blocks.append(
             f"<b>{pid}.</b> {esc(short_name)}\n"
             f"💰 <code>{current_str}</code>{change_info}{merchant_info}{stock_info}{alert_info}\n"
             f"{links}\n"
         )
 
-    return "\n".join(lines)
+    return paginate_blocks(header, blocks)
 
 
 def is_valid_amazon_url(url: str) -> bool:
@@ -468,9 +528,9 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
             await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            msg = build_products_list_message(products, lang, bot_username=context.bot.username)
+            pages = build_products_list_pages(products, lang, bot_username=context.bot.username)
             keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
-            await query.edit_message_text(msg, parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
+            await send_pages(pages, InlineKeyboardMarkup(keyboard), query=query)
 
     elif action == "check":
         user_is_admin = user_id == ADMIN_ID or (user_id and is_admin(user_id))
@@ -782,14 +842,9 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
         return
 
-    msg = build_products_list_message(products, lang, bot_username=context.bot.username)
+    pages = build_products_list_pages(products, lang, bot_username=context.bot.username)
     keyboard = [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
-    await update.message.reply_text(
-        msg,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    await send_pages(pages, InlineKeyboardMarkup(keyboard), message=update.message)
 
 
 async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -984,14 +1039,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 msg = "📦 *Your tracked products*\n\n_You haven't added any products yet._\n\nUse 📦 to add your first product!"
             await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu_markup(lang, user_id))
             return
-        msg = build_products_list_message(products, lang, bot_username=context.bot.username)
+        pages = build_products_list_pages(products, lang, bot_username=context.bot.username)
         keyboard = [[InlineKeyboardButton("◀ Back" if lang == "en" else "◀ العودة", callback_data="back_to_menu")]]
-        await update.message.reply_text(
-            msg,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await send_pages(pages, InlineKeyboardMarkup(keyboard), message=update.message)
         return
 
     elif button_action == "check":
@@ -1116,6 +1166,18 @@ ADMIN_STRINGS = {
         "interval_saved_restart": "✅ Saved: every {value}.\n\n_It will apply when the bot next starts._",
         "interval_invalid": "❌ Send a whole number of minutes, e.g. `45`.",
         "interval_out_of_range": "❌ Pick between {min} and {max} minutes.",
+        "stats_last_scan": "📊 Last Scan",
+        "scan_title": "📊 *Last scan*",
+        "scan_none": "_No scan recorded yet. Run /check to measure one._",
+        "scan_took": "Took *{duration}* for {count} item(s) (~{per_item} each)",
+        "scan_when": "Finished: {when}",
+        "scan_failed": "⚠️ {failed} item(s) could not be fetched",
+        "scan_incomplete": "⚠️ Stopped early because of an error",
+        "scan_estimate": "Estimated for the {count} item(s) tracked now: ~{duration}",
+        "scan_overlap": "🔴 *A scan takes longer than the interval.* While one is still running the next is skipped, so prices are checked less often than set.",
+        "scan_tight": "🟡 *Close to the limit:* a scan uses most of the interval.",
+        "scan_ok": "🟢 Fits the interval comfortably.",
+        "scan_suggest": "💡 Suggested minimum: *{value}*",
     },
     "ar": {
         "panel": "⚙️ *لوحة الإدارة*",
@@ -1161,6 +1223,18 @@ ADMIN_STRINGS = {
         "interval_saved_restart": "✅ تم الحفظ: كل {value}.\n\n_سيُطبَّق عند إعادة تشغيل البوت._",
         "interval_invalid": "❌ أرسل عدد الدقائق كرقم صحيح، مثل `45`.",
         "interval_out_of_range": "❌ اختر بين {min} و {max} دقيقة.",
+        "stats_last_scan": "📊 آخر فحص",
+        "scan_title": "📊 *آخر فحص*",
+        "scan_none": "_لم يُسجَّل أي فحص بعد. استخدم /check لقياس فحص._",
+        "scan_took": "استغرق *{duration}* لعدد {count} منتج (~{per_item} لكل منتج)",
+        "scan_when": "انتهى: {when}",
+        "scan_failed": "⚠️ تعذّر جلب {failed} منتج",
+        "scan_incomplete": "⚠️ توقف مبكرًا بسبب خطأ",
+        "scan_estimate": "التقدير لعدد المنتجات الحالي ({count}): ~{duration}",
+        "scan_overlap": "🔴 *الفحص يستغرق وقتًا أطول من الفترة.* أثناء تشغيل فحص يتم تخطي الفحص التالي، فتُفحص الأسعار بمعدل أقل من المحدد.",
+        "scan_tight": "🟡 *قريب من الحد:* الفحص يستهلك معظم الفترة.",
+        "scan_ok": "🟢 مناسب للفترة الحالية.",
+        "scan_suggest": "💡 الحد الأدنى المقترح: *{value}*",
     },
 }
 
@@ -1183,6 +1257,14 @@ def build_users_message(users, lang: str) -> str:
     return "\n".join(lines)
 
 
+def last_scan_summary(lang: str) -> str:
+    """One-line 'how long did the last sweep take' for the stats screen."""
+    scan = get_last_scan()
+    if not scan:
+        return "—"
+    return f"{format_duration(scan.get('duration_seconds', 0), lang)} / {scan.get('product_count', 0)}"
+
+
 def build_stats_message(users, products, lang: str, interval_minutes: int) -> str:
     """Render bot statistics in the admin's language."""
     t = adm(lang)
@@ -1191,6 +1273,7 @@ def build_stats_message(users, products, lang: str, interval_minutes: int) -> st
         f"{t['stats_users']}: {len(users)}\n"
         f"{t['stats_products']}: {len(products)}\n"
         f"{t['stats_interval']}: {format_interval(interval_minutes, lang)}\n"
+        f"{t['stats_last_scan']}: {last_scan_summary(lang)}\n"
         f"{t['stats_db']}: {t['stats_db_ok']}\n"
         f"{t['stats_sched']}: {t['stats_sched_ok']}"
     )
@@ -1211,12 +1294,93 @@ def format_interval(minutes: int, lang: str) -> str:
     return f"{minutes} minute" + ("" if minutes == 1 else "s")
 
 
+def format_duration(seconds: float, lang: str) -> str:
+    """Compact elapsed time: 45s, 7m 32s, 1h 05m."""
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if lang == "ar":
+        units = ("س", "د", "ث")
+        sep = " "
+    else:
+        units = ("h", "m", "s")
+        sep = ""
+    if h:
+        return f"{h}{sep}{units[0]} {m:02d}{sep}{units[1]}"
+    if m:
+        return f"{m}{sep}{units[1]} {s:02d}{sep}{units[2]}"
+    return f"{s}{sep}{units[2]}"
+
+
+# Leave room for a slower-than-usual sweep (Amazon throttling, retries) so a
+# bad run still finishes before the next one is due.
+SCAN_HEADROOM = 1.5
+
+
+def suggest_interval(estimated_seconds: float) -> int:
+    """Smallest interval, rounded up to 5 minutes, that the sweep fits in."""
+    minutes = estimated_seconds * SCAN_HEADROOM / 60
+    minutes = int(-(-minutes // 5) * 5)  # ceil to a multiple of 5
+    return min(max(minutes, MIN_CHECK_INTERVAL_MINUTES), MAX_CHECK_INTERVAL_MINUTES)
+
+
+def build_last_scan_section(lang: str, interval_minutes: int, current_count: int) -> str:
+    """How long the last sweep took and whether it fits the interval."""
+    t = adm(lang)
+    scan = get_last_scan()
+    if not scan:
+        return f"{t['scan_title']}\n{t['scan_none']}"
+
+    duration = scan.get("duration_seconds", 0)
+    count = scan.get("product_count", 0)
+    per_item = duration / count if count else 0
+    lines = [
+        t["scan_title"],
+        t["scan_took"].format(
+            duration=format_duration(duration, lang),
+            count=count,
+            per_item=format_duration(per_item, lang),
+        ),
+    ]
+    if scan.get("finished_at"):
+        when = datetime.fromtimestamp(scan["finished_at"]).strftime("%Y-%m-%d %H:%M")
+        lines.append(t["scan_when"].format(when=when))
+    if scan.get("failed_count"):
+        lines.append(t["scan_failed"].format(failed=scan["failed_count"]))
+    if not scan.get("completed", True):
+        lines.append(t["scan_incomplete"])
+
+    # Items may have been added or removed since that sweep; scale the
+    # per-item time to today's list so the advice matches what will run next.
+    estimate = per_item * current_count if count else duration
+    if current_count and current_count != count:
+        lines.append(t["scan_estimate"].format(
+            count=current_count, duration=format_duration(estimate, lang)
+        ))
+
+    interval_seconds = interval_minutes * 60
+    lines.append("")
+    if estimate >= interval_seconds:
+        lines.append(t["scan_overlap"])
+    elif estimate * SCAN_HEADROOM > interval_seconds:
+        lines.append(t["scan_tight"])
+    else:
+        lines.append(t["scan_ok"])
+    if estimate * SCAN_HEADROOM > interval_seconds:
+        lines.append(t["scan_suggest"].format(
+            value=format_interval(suggest_interval(estimate), lang)
+        ))
+    return "\n".join(lines)
+
+
 def build_interval_screen(lang: str, current: int):
-    """The scan-interval screen: presets, a custom option, and what's active."""
+    """The scan-interval screen: presets, a custom option, what's active, and
+    how long the last sweep took so the admin can pick an interval it fits in."""
     t = adm(lang)
     msg = (
         f"{t['interval_title']}\n\n"
         f"{t['interval_current'].format(value=format_interval(current, lang))}\n\n"
+        f"{build_last_scan_section(lang, current, len(get_all_products()))}\n\n"
         f"{t['interval_note']}"
     )
 
@@ -1486,16 +1650,10 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=InlineKeyboardMarkup(back)
             )
         else:
-            full_msg = build_products_list_message(products, lang)
-            # Extract just the products part (skip the title from build_products_list_message)
-            products_content = full_msg.split("\n", 1)[1] if "\n" in full_msg else full_msg
-            display_msg = f"{t['user_products_title'].format(name=esc(user_name))}\n\n{products_content}"
-            await query.edit_message_text(
-                display_msg,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup(back)
+            pages = build_products_list_pages(
+                products, lang, title=t["user_products_title"].format(name=esc(user_name))
             )
+            await send_pages(pages, InlineKeyboardMarkup(back), query=query)
 
     elif action.startswith("revoke_"):
         target_id = int(action.split("_")[1])

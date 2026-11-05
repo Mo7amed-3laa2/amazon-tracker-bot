@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import os
 import shutil
 import logging
@@ -268,6 +269,34 @@ def get_check_interval(default: int) -> int:
 def set_check_interval(minutes: int):
     set_setting(CHECK_INTERVAL_SETTING, str(int(minutes)))
     logger.info(f"[database] Check interval set to {minutes} minute(s)")
+
+
+# How long the last full sweep took, so the admin can pick an interval the
+# sweep actually fits in. Stored as JSON under one key so the fields are
+# always written together.
+LAST_SCAN_SETTING = "last_scan"
+
+
+def set_last_scan(duration_seconds: float, product_count: int, failed_count: int, finished_at: float, completed: bool):
+    set_setting(LAST_SCAN_SETTING, json.dumps({
+        "duration_seconds": round(duration_seconds, 1),
+        "product_count": product_count,
+        "failed_count": failed_count,
+        "finished_at": finished_at,
+        "completed": completed,
+    }))
+
+
+def get_last_scan() -> dict | None:
+    """The last sweep's stats, or None if no sweep has been recorded yet."""
+    raw = get_setting(LAST_SCAN_SETTING)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"[database] Ignoring malformed {LAST_SCAN_SETTING}={raw!r}")
+        return None
 
 
 def add_product(url: str, name: str, price: float, image_url: str | None = None, merchant_name: str | None = None, is_amazon: bool = True) -> int:

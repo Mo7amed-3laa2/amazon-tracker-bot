@@ -1,10 +1,11 @@
 import asyncio
 import logging
+import time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from database import (
     get_all_products, update_price, get_user_for_product_notification,
-    get_user_language, set_product_availability
+    get_user_language, set_product_availability, set_last_scan
 )
 from formatting import esc, link
 from scraper import canonical_product_url, fetch_product
@@ -126,6 +127,24 @@ async def check_prices(bot: Bot, chat_id: str):
         return
 
     logger.info(f"[scheduler] Checking {len(products)} product(s)...")
+    started = time.monotonic()
+    stats = {"failed": 0}
+    completed = False
+    try:
+        await _sweep(bot, products, stats)
+        completed = True
+    finally:
+        # Recorded even when the sweep dies part-way, so the admin still sees
+        # how long it ran; `completed` tells the two cases apart.
+        duration = time.monotonic() - started
+        try:
+            set_last_scan(duration, len(products), stats["failed"], time.time(), completed)
+        except Exception as e:
+            logger.error(f"[scheduler] Could not record scan duration: {e}")
+        logger.info(f"[scheduler] Sweep of {len(products)} product(s) took {duration:.1f}s")
+
+
+async def _sweep(bot: Bot, products, stats: dict):
     updated_count = 0
 
     for product_data in products:
@@ -140,6 +159,7 @@ async def check_prices(bot: Bot, chat_id: str):
         result = await asyncio.to_thread(fetch_product, url)
         if result is None:
             logger.warning(f"[scheduler] Could not fetch: {url}")
+            stats["failed"] += 1
             continue
 
         # Any price still shown on a sold-out page is stale or belongs to
