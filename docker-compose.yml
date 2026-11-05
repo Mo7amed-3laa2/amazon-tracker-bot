@@ -8,6 +8,9 @@ services:
       - .env
     environment:
       DB_PATH: /data/tracker.db
+      # Containers default to UTC; without this every time the bot shows
+      # (e.g. "last scan finished") is 2 hours behind the host. Override in .env.
+      TZ: ${TZ:-Africa/Cairo}
     volumes:
       - amazon_tracker_data:/data
     restart: unless-stopped
