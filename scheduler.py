@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
@@ -21,6 +22,27 @@ PRICE_CHECK_JOB_ID = "price_check"
 # one still running (and hammering Amazon is what gets the host IP blocked).
 MIN_CHECK_INTERVAL_MINUTES = 10
 MAX_CHECK_INTERVAL_MINUTES = 7 * 24 * 60
+
+# Fetching back-to-back is what trips Akamai's bot check on amazon.eg: a
+# 42-item sweep that ran in about a minute had a few random items challenged
+# on every run. A human-sized gap between products keeps the request rate
+# under that threshold.
+PRODUCT_DELAY_SECONDS = (4.0, 8.0)
+# Items still challenged after their own retries get one more try at the end
+# of the sweep, once the burst has had time to cool off, instead of waiting a
+# whole interval for the next sweep.
+RETRY_COOLDOWN_SECONDS = 60
+
+
+async def _pause():
+    await asyncio.sleep(random.uniform(*PRODUCT_DELAY_SECONDS))
+
+
+# One sweep at a time. APScheduler's max_instances=1 covers the scheduled job,
+# but /check and the menu's check button run a sweep too, and the two must not
+# interleave: both write prices, so each would compare against a baseline the
+# other has already moved (and double the request rate Amazon sees).
+_sweep_lock = asyncio.Lock()
 
 
 def get_localized_notification(product_name: str, last_price: float, new_price: float, url: str, lang: str, alert_price: float | None = None, product_id: int | None = None) -> str:
@@ -120,7 +142,18 @@ def _should_notify_user(alert_price: float | None, require_amazon: bool, new_pri
     return True
 
 
-async def check_prices(bot: Bot, chat_id: str):
+async def check_prices(bot: Bot, chat_id: str) -> bool:
+    """Run one sweep. Returns False if one was already running and this
+    trigger was skipped."""
+    if _sweep_lock.locked():
+        logger.info("[scheduler] Sweep already running — skipping this trigger")
+        return False
+    async with _sweep_lock:
+        await _timed_sweep(bot)
+    return True
+
+
+async def _timed_sweep(bot: Bot):
     products = get_all_products()
     if not products:
         logger.info("[scheduler] No products to check")
@@ -147,81 +180,117 @@ async def check_prices(bot: Bot, chat_id: str):
 async def _sweep(bot: Bot, products, stats: dict):
     updated_count = 0
 
-    for product_data in products:
-        product_id = product_data[0]
-        url = product_data[1]
-        product_name = product_data[2]
-        last_price = product_data[3]
-        was_available = product_data[7] if len(product_data) > 7 else 1
-
-        # Blocking network I/O — keep it off the event loop so the bot stays
-        # responsive while a scheduled sweep is running.
-        result = await asyncio.to_thread(fetch_product, url)
-        if result is None:
-            logger.warning(f"[scheduler] Could not fetch: {url}")
-            stats["failed"] += 1
-            continue
-
-        # Any price still shown on a sold-out page is stale or belongs to
-        # another seller's offer, so it is neither notified on nor stored —
-        # otherwise the bot alerts on a price nobody can pay and then treats
-        # that phantom price as the baseline for the next comparison.
-        if not result.get("available", True):
-            if was_available:
-                logger.info(f"[scheduler] '{product_name}' is now unavailable — holding last known price")
-            set_product_availability(url, False)
-            continue
-
-        if not was_available:
-            logger.info(f"[scheduler] '{product_name}' is available again")
-            set_product_availability(url, True)
-
-        new_price = result["price"]
-        is_amazon = result.get("is_amazon", True)
-
-        if last_price is None:
-            update_price(url, new_price)
-            logger.info(f"[scheduler] Initial price set for '{product_name}': EGP {new_price:,.2f}")
-            continue
-
-        if new_price != last_price:
-            price_percent = ((last_price - new_price) / last_price) * 100
-
-            users = get_user_for_product_notification(product_id)
-            if not users:
-                logger.warning(f"[scheduler] No users tracking product {product_id}")
-                update_price(url, new_price)
-                continue
-
-            sent_count = 0
-            for user_id, user_lang, price_min, alert_price, require_amazon in users:
-                if not _should_notify_user(alert_price, require_amazon, new_price, is_amazon):
-                    logger.debug(
-                        f"[scheduler] Skipping notification for user {user_id}: "
-                        f"price={new_price}, alert={alert_price}, "
-                        f"is_amazon={is_amazon}, require_amazon={require_amazon}"
-                    )
-                    continue
-
-                try:
-                    message = get_localized_notification(
-                        product_name, last_price, new_price, url, user_lang, alert_price, product_id
-                    )
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=message,
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                    )
-                    sent_count += 1
-                except Exception as e:
-                    logger.error(f"[scheduler] Failed to send notification to user {user_id}: {e}")
-
-            update_price(url, new_price)
+    failed = []
+    for i, product_data in enumerate(products):
+        if i:
+            await _pause()
+        outcome = await _check_one(bot, product_data, stats, retry_later=True)
+        if outcome == FAILED:
+            failed.append(product_data)
+        elif outcome == CHANGED:
             updated_count += 1
-            logger.info(f"[scheduler] Price changed for '{product_name}': {last_price} -> {new_price} ({price_percent:+.1f}%) [notified {sent_count} user(s)]")
+
+    if failed:
+        logger.info(
+            f"[scheduler] Retrying {len(failed)} product(s) that could not be fetched, "
+            f"after a {RETRY_COOLDOWN_SECONDS}s cooldown"
+        )
+        await asyncio.sleep(RETRY_COOLDOWN_SECONDS)
+        for i, product_data in enumerate(failed):
+            if i:
+                await _pause()
+            if await _check_one(bot, product_data, stats, retry_later=False) == CHANGED:
+                updated_count += 1
 
     logger.info(f"[scheduler] Check complete: {updated_count} product(s) with price changes")
+
+
+CHECKED, CHANGED, FAILED = "checked", "changed", "failed"
+
+
+async def _check_one(bot: Bot, product_data, stats: dict, retry_later: bool) -> str:
+    """Check one product and act on its price: CHECKED, CHANGED or FAILED.
+
+    With `retry_later`, a failed fetch is not counted yet: the sweep collects
+    those and tries them once more after a cooldown.
+    """
+    product_id = product_data[0]
+    url = product_data[1]
+    product_name = product_data[2]
+    last_price = product_data[3]
+    was_available = product_data[7] if len(product_data) > 7 else 1
+
+    # Blocking network I/O — keep it off the event loop so the bot stays
+    # responsive while a scheduled sweep is running.
+    result = await asyncio.to_thread(fetch_product, url)
+    if result is None:
+        if retry_later:
+            logger.info(f"[scheduler] Could not fetch {url} — retrying at the end of the sweep")
+            return FAILED
+        logger.warning(f"[scheduler] Could not fetch: {url}")
+        stats["failed"] += 1
+        return FAILED
+
+    # Any price still shown on a sold-out page is stale or belongs to
+    # another seller's offer, so it is neither notified on nor stored —
+    # otherwise the bot alerts on a price nobody can pay and then treats
+    # that phantom price as the baseline for the next comparison.
+    if not result.get("available", True):
+        if was_available:
+            logger.info(f"[scheduler] '{product_name}' is now unavailable — holding last known price")
+        set_product_availability(url, False)
+        return CHECKED
+
+    if not was_available:
+        logger.info(f"[scheduler] '{product_name}' is available again")
+        set_product_availability(url, True)
+
+    new_price = result["price"]
+    is_amazon = result.get("is_amazon", True)
+
+    if last_price is None:
+        update_price(url, new_price)
+        logger.info(f"[scheduler] Initial price set for '{product_name}': EGP {new_price:,.2f}")
+        return CHECKED
+
+    if new_price != last_price:
+        price_percent = ((last_price - new_price) / last_price) * 100
+
+        users = get_user_for_product_notification(product_id)
+        if not users:
+            logger.warning(f"[scheduler] No users tracking product {product_id}")
+            update_price(url, new_price)
+            return CHECKED
+
+        sent_count = 0
+        for user_id, user_lang, price_min, alert_price, require_amazon in users:
+            if not _should_notify_user(alert_price, require_amazon, new_price, is_amazon):
+                logger.debug(
+                    f"[scheduler] Skipping notification for user {user_id}: "
+                    f"price={new_price}, alert={alert_price}, "
+                    f"is_amazon={is_amazon}, require_amazon={require_amazon}"
+                )
+                continue
+
+            try:
+                message = get_localized_notification(
+                    product_name, last_price, new_price, url, user_lang, alert_price, product_id
+                )
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"[scheduler] Failed to send notification to user {user_id}: {e}")
+
+        update_price(url, new_price)
+        logger.info(f"[scheduler] Price changed for '{product_name}': {last_price} -> {new_price} ({price_percent:+.1f}%) [notified {sent_count} user(s)]")
+        return CHANGED
+
+    return CHECKED
 
 
 def start_scheduler(bot: Bot, chat_id: str, interval_minutes: int) -> AsyncIOScheduler:

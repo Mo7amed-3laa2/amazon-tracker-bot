@@ -538,20 +538,17 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer(adm(lang)["admin_only"], show_alert=True)
             return
 
-        from scheduler import check_prices
-
-        if lang == "ar":
-            checking = "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بعض الوقت._"
-            done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
-        else:
-            checking = "🔍 *Checking prices...*\n\n_This can take a while._"
-            done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
-
         back_btn = "◀ العودة" if lang == "ar" else "◀ Back"
-        keyboard = [[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]]
-        await query.edit_message_text(checking, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        await check_prices(context.bot, CHAT_ID)
-        await query.edit_message_text(done, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(back_btn, callback_data="back_to_menu")]])
+        await query.edit_message_text(checking_text(lang), parse_mode="Markdown", reply_markup=markup)
+        message = query.message
+        # The sweep outlives this callback, so the result is written to the
+        # message itself. If the user has navigated it elsewhere meanwhile,
+        # it is replaced by the result, which keeps its Back button.
+        start_manual_check(
+            context, lang,
+            lambda text: message.edit_text(text, parse_mode="Markdown", reply_markup=markup),
+        )
 
     elif action == "untrack":
         context.user_data["awaiting_untrack_id"] = True
@@ -1045,21 +1042,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     elif button_action == "check":
-        from scheduler import check_prices
-        if lang == "ar":
-            checking = "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بعض الوقت._"
-            done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
-        else:
-            checking = "🔍 *Checking prices...*\n\n_This can take a while._"
-            done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
-        checking_msg = await update.message.reply_text(checking, parse_mode="Markdown")
-        await check_prices(context.bot, CHAT_ID)
-        await context.bot.edit_message_text(
-            chat_id=user_id,
-            message_id=checking_msg.message_id,
-            text=done,
-            parse_mode="Markdown"
-        )
+        checking_msg = await update.message.reply_text(checking_text(lang), parse_mode="Markdown")
+        start_manual_check(context, lang, lambda text: checking_msg.edit_text(text, parse_mode="Markdown"))
         return
 
     elif button_action == "untrack":
@@ -1487,24 +1471,46 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def start_manual_check(context: ContextTypes.DEFAULT_TYPE, lang: str, show) -> None:
+    """Run a sweep in the background and report through `show(text)`.
+
+    A sweep paces its requests to stay under Amazon's bot check, so it takes
+    minutes. The bot handles one update at a time, so awaiting the sweep in
+    the handler would leave everyone else's messages unanswered until it ended.
+    """
+    from scheduler import check_prices
+
+    if lang == "ar":
+        done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
+        busy = "⏳ *يوجد فحص قيد التشغيل بالفعل*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
+    else:
+        done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
+        busy = "⏳ *A price check is already running*\n\n_You'll get a message for any price that changed._"
+
+    async def run():
+        try:
+            ran = await check_prices(context.bot, CHAT_ID)
+            await show(done if ran else busy)
+        except Exception:
+            logger.exception("[bot] Manual price check failed")
+
+    context.application.create_task(run())
+
+
+def checking_text(lang: str) -> str:
+    if lang == "ar":
+        return "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بضع دقائق. يمكنك متابعة استخدام البوت._"
+    return "🔍 *Checking prices...*\n\n_This takes a few minutes. You can keep using the bot meanwhile._"
+
+
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
-    from scheduler import check_prices
-
     user_id = update.effective_user.id
     lang = get_lang(context, user_id)
-    if lang == "ar":
-        checking = "🔍 *جاري فحص الأسعار...*\n\n_قد يستغرق هذا بعض الوقت._"
-        done = "✅ *تم فحص الأسعار*\n\n_ستصلك رسالة عند تغيّر أي سعر._"
-    else:
-        checking = "🔍 *Checking prices...*\n\n_This can take a while._"
-        done = "✅ *Price check complete*\n\n_You'll get a message for any price that changed._"
-
-    status = await update.message.reply_text(checking, parse_mode="Markdown")
-    await check_prices(context.bot, CHAT_ID)
-    await status.edit_text(done, parse_mode="Markdown")
+    status = await update.message.reply_text(checking_text(lang), parse_mode="Markdown")
+    start_manual_check(context, lang, lambda text: status.edit_text(text, parse_mode="Markdown"))
 
 
 async def show_admin_panel(update_or_query, lang: str = "en"):
